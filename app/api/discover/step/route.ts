@@ -1,0 +1,16 @@
+import { NextResponse } from "next/server";
+import { stepDiscover } from "@/lib/discover";
+
+export const runtime = "nodejs";
+export const maxDuration = 60;
+
+export async function POST(req: Request) {
+  try {
+    const body = (await req.json().catch(() => ({}))) as { runId?: string };
+    const result = await stepDiscover(body.runId);
+    return NextResponse.json(result);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "discover step error";
+    return NextResponse.json({ error: msg }, { status: 500 });
+  }
+}
