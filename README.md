@@ -6,7 +6,7 @@
 
 ## 功能
 
-- **发现**：点击后抓取东方财富全市场快照，粗筛掉 ST / \*ST、上市不足 60 天、日成交额低于 5000 万元的股票，再对候选股按一周日 K 打优秀度分。本轮前 10 写入观察池（`source=ai`），并替换上一轮 AI 池。全程约 5–15 分钟，页面需保持打开。
+- **发现**：点击后抓取必盈全市场列表与快照，粗筛掉 ST / \*ST、上市不足 60 天、近 5 日日均成交额低于 5000 万元的股票，再对候选股按日 K 特征打优秀度分。本轮排序后生成「建议纳入」（不自动入池）；用户可从建议或手动输入加入观察池。全程约 5–15 分钟，页面需保持打开。
 - **手动观察**：输入 6 位代码加入观察池（`source=manual`）。手动股票不会被发现流程覆盖或删除。
 - **买入轮询**：交易时段内，页面对观察池每 30 分钟问一次「当前是否适合立即买入」，展示概率。
 - **卖出轮询**：录入持仓（代码 + 数量）后，与买入轮询同轮执行，问「当前是否适合立即卖出」。
@@ -20,7 +20,7 @@
 | 框架 | Next.js（App Router） |
 | 数据库 | Supabase Postgres（只用持久化） |
 | 模型 | OpenRouter Decisions API，`~typesafe/jev-latest` |
-| 行情 | 东方财富公开接口（全市场快照、日 K、分钟 K、指数 K） |
+| 行情 | 必盈 API（列表、实时、日 K、5 分钟 K、指数）；装配点 `lib/market-data.ts` 的 `getMarketData()` |
 | 部署 | Vercel Hobby |
 
 Jev 只返回结构化概率（是非判断、有序打分），界面直接显示百分比。长任务由前端分批调用 step 接口推进，以避开 Vercel Hobby 单请求 60 秒限制。进度写在 `runs` 表，刷新或重开页面会续跑未完成任务。
@@ -40,10 +40,18 @@ npm run dev
 - `OPENROUTER_API_KEY`
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
+- `biying_api_key`
 
 密钥只放在本地，不要提交仓库。
 
-在 Supabase 中执行 [`supabase/migrations/001_init.sql`](supabase/migrations/001_init.sql) 建表（`watchlist`、`holdings`、`runs`、`judgments`）。
+在 Supabase 中按序执行迁移：
+
+1. [`001_init.sql`](supabase/migrations/001_init.sql) — 初始建表
+2. [`002_int_ids.sql`](supabase/migrations/002_int_ids.sql) — 整数主键重建（会清空业务表）
+3. [`003_last_price.sql`](supabase/migrations/003_last_price.sql) — 现价列
+4. [`004_tags.sql`](supabase/migrations/004_tags.sql) — 规则标签列
+
+表：`watchlist`、`holdings`、`runs`、`judgments`。
 
 ## 脚本
 
@@ -63,4 +71,4 @@ npm run dev
 | `/api/poll/step` | POST | 推进一批轮询（每批约 10 只，先观察池后持仓） |
 | `/api/watchlist` | GET / POST / DELETE | 观察池 |
 | `/api/holdings` | GET / POST / DELETE | 持仓 |
-| `/api/status` | GET | 运行中任务、上次轮询时间、是否交易时段 |
+| `/api/status` | GET | 运行中任务、建议纳入、上次轮询时间、是否交易时段 |
