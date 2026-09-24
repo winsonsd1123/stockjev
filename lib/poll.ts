@@ -1,11 +1,4 @@
-import {
-  fetchDailyKlines,
-  fetchIndexContext,
-  fetchIntraday5m,
-  fetchQuotes,
-  isShanghaiTradingDay,
-  type KlineBar,
-} from "@/lib/eastmoney";
+import { getMarketData, type KlineBar } from "@/lib/market-data";
 import {
   deriveDailyFeatures,
   deriveIntradayFeatures,
@@ -86,7 +79,7 @@ export async function startPollRun(): Promise<
   | { skipped: true; reason: string }
   | { skipped: false; runId: number }
 > {
-  const tradingDay = await isShanghaiTradingDay();
+  const tradingDay = await getMarketData().isShanghaiTradingDay();
   if (!isTradingSession(tradingDay)) {
     console.log("[poll] skip 非交易时段");
     return { skipped: true, reason: "非交易时段" };
@@ -383,7 +376,7 @@ export async function stepPoll(runId?: number): Promise<StepResult> {
   const events: StepEvent[] = [];
 
   if (progress.phase === "context" || !progress.context) {
-    const ctx = await fetchIndexContext();
+    const ctx = await getMarketData().fetchIndexContext();
     const intradayRet = indexIntradayReturn(ctx.intraday5m, ctx.daily5);
     const ret5 = ret5Of(ctx.daily5);
     const indexOk = await judgeIndex({
@@ -422,7 +415,7 @@ export async function stepPoll(runId?: number): Promise<StepResult> {
     progress.cursor,
     progress.cursor + BATCH_SIZE
   );
-  const quotes = await fetchQuotes(
+  const quotes = await getMarketData().fetchQuotes(
     batch.map((b) => ({ market: b.market, code: b.code }))
   );
   const quoteMap = new Map(quotes.map((q) => [`${q.market}:${q.code}`, q]));
@@ -430,8 +423,8 @@ export async function stepPoll(runId?: number): Promise<StepResult> {
   for (const item of batch) {
     try {
       const [bars5m, dailyBars] = await Promise.all([
-        fetchIntraday5m(item.market, item.code),
-        fetchDailyKlines(item.market, item.code, 60),
+        getMarketData().fetchIntraday5m(item.market, item.code),
+        getMarketData().fetchDailyKlines(item.market, item.code, 60),
       ]);
       if (bars5m.length === 0) {
         progress.failedCodes.push(item.code);

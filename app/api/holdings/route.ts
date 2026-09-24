@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { resolveStock } from "@/lib/eastmoney";
+import { getMarketData } from "@/lib/market-data";
 import { normalizeCode } from "@/lib/market";
 import { getSupabase } from "@/lib/supabase";
 
@@ -51,7 +51,7 @@ export async function POST(req: Request) {
       }
       entryPrice = n;
     }
-    const stock = await resolveStock(code);
+    const stock = await getMarketData().resolveStock(code);
     if (entryPrice == null && stock.price > 0) entryPrice = stock.price;
     const sb = getSupabase();
     const { data, error } = await sb

@@ -1,6 +1,5 @@
-import { fetchEastmoneyPage, fetchSinaPage } from "../lib/eastmoney";
+import { getMarketData, type MarketSnapshot } from "../lib/market-data";
 import { shouldScore } from "../lib/filter";
-import type { MarketSnapshot } from "../lib/eastmoney";
 
 function tally(items: MarketSnapshot[], label: string) {
   const reasons: Record<string, number> = { ok: 0 };
@@ -25,16 +24,10 @@ function tally(items: MarketSnapshot[], label: string) {
 
 async function main() {
   try {
-    const em = await fetchEastmoneyPage(1, 100);
-    tally(em.items, "eastmoney p1");
+    const page = await getMarketData().fetchSnapshotPage(1, 100);
+    tally(page.items, "biying p1");
   } catch (e) {
-    console.log("eastmoney fail", e instanceof Error ? e.message : e);
-  }
-  try {
-    const sina = await fetchSinaPage("hs_a", 1);
-    tally(sina, "sina hs_a p1");
-  } catch (e) {
-    console.log("sina fail", e instanceof Error ? e.message : e);
+    console.log("biying fail", e instanceof Error ? e.message : e);
   }
 }
 

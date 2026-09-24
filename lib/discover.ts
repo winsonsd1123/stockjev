@@ -1,10 +1,8 @@
 import {
-  fetchDailyKlines,
-  fetchEastmoneyPage,
-  fetchSinaPage,
+  getMarketData,
   type KlineBar,
   type MarketSnapshot,
-} from "@/lib/eastmoney";
+} from "@/lib/market-data";
 import {
   bucketCap,
   bucketPb,
@@ -28,10 +26,9 @@ export type Suggestion = {
 
 export type DiscoverProgress = {
   phase: "scan" | "commit";
-  snapshotSource: "eastmoney" | "sina" | null;
+  snapshotSource: "biying" | null;
   snapshotPage: number;
   snapshotPages: number;
-  sinaNode: "hs_a" | "hs_bjs";
   pageCursor: number;
   scored: number;
   skipped: number;
@@ -68,7 +65,7 @@ export function discoverBarCounts(progress: {
   const processed = (progress.scored ?? 0) + (progress.skipped ?? 0);
   const pages = progress.snapshotPages ?? 0;
   const total =
-    progress.snapshotSource === "eastmoney" && pages > 0
+    progress.snapshotSource === "biying" && pages > 0
       ? pages * 100
       : processed + MAX_SCORE_PER_STEP;
   return { processed, total: Math.max(total, processed) };
@@ -80,7 +77,6 @@ function emptyProgress(): DiscoverProgress {
     snapshotSource: null,
     snapshotPage: 1,
     snapshotPages: 0,
-    sinaNode: "hs_a",
     pageCursor: 0,
     scored: 0,
     skipped: 0,
@@ -187,7 +183,7 @@ async function scoreOne(
   }
 
   try {
-    const klines = await fetchDailyKlines(snap.market, snap.code, 120);
+    const klines = await getMarketData().fetchDailyKlines(snap.market, snap.code, 120);
     if (klines.length === 0) {
       console.log(`[discover] fail ${snap.code} 无日K`);
       return { level: "fail", text: `${snap.code} ${snap.name} 无日K，跳过` };
@@ -275,48 +271,24 @@ async function scoreOne(
 async function loadPage(
   progress: DiscoverProgress
 ): Promise<{ items: MarketSnapshot[]; done: boolean }> {
+  const data = getMarketData();
   if (!progress.snapshotSource) {
-    try {
-      const first = await fetchEastmoneyPage(1, 100);
-      progress.snapshotSource = "eastmoney";
-      progress.snapshotPages = Math.max(1, Math.ceil(first.total / 100));
-      progress.snapshotPage = 1;
-      progress.pageCursor = 0;
-      console.log(
-        `[discover] eastmoney pages=${progress.snapshotPages} total=${first.total}`
-      );
-      return { items: first.items, done: false };
-    } catch {
-      progress.snapshotSource = "sina";
-      progress.sinaNode = "hs_a";
-      progress.snapshotPage = 1;
-      progress.pageCursor = 0;
-      console.log("[discover] eastmoney unavailable, use sina");
-      const items = await fetchSinaPage("hs_a", 1);
-      return { items, done: false };
-    }
+    const first = await data.fetchSnapshotPage(1, 100);
+    progress.snapshotSource = "biying";
+    progress.snapshotPages = Math.max(1, Math.ceil(first.total / 100));
+    progress.snapshotPage = 1;
+    progress.pageCursor = 0;
+    console.log(
+      `[discover] biying pages=${progress.snapshotPages} total=${first.total}`
+    );
+    return { items: first.items, done: false };
   }
 
-  if (progress.snapshotSource === "eastmoney") {
-    if (progress.snapshotPage > progress.snapshotPages) {
-      return { items: [], done: true };
-    }
-    const page = await fetchEastmoneyPage(progress.snapshotPage, 100);
-    return { items: page.items, done: false };
-  }
-
-  const items = await fetchSinaPage(progress.sinaNode, progress.snapshotPage);
-  if (items.length === 0) {
-    if (progress.sinaNode === "hs_a") {
-      progress.sinaNode = "hs_bjs";
-      progress.snapshotPage = 1;
-      progress.pageCursor = 0;
-      const bj = await fetchSinaPage("hs_bjs", 1);
-      return { items: bj, done: false };
-    }
+  if (progress.snapshotPage > progress.snapshotPages) {
     return { items: [], done: true };
   }
-  return { items, done: false };
+  const page = await data.fetchSnapshotPage(progress.snapshotPage, 100);
+  return { items: page.items, done: false };
 }
 
 export async function stepDiscover(runId?: number): Promise<StepResult> {
@@ -341,7 +313,7 @@ export async function stepDiscover(runId?: number): Promise<StepResult> {
   const events: StepEvent[] = [];
   if (!progress.indexBars) {
     try {
-      progress.indexBars = await fetchDailyKlines("sh", "000001", 120);
+      progress.indexBars = await getMarketData().fetchDailyKlines("sh", "000001", 120);
     } catch {
       progress.indexBars = [];
     }
@@ -392,7 +364,7 @@ export async function stepDiscover(runId?: number): Promise<StepResult> {
       progress.snapshotPage += 1;
       progress.pageCursor = 0;
       if (
-        progress.snapshotSource === "eastmoney" &&
+        progress.snapshotSource === "biying" &&
         progress.snapshotPage > progress.snapshotPages
       ) {
         progress.phase = "commit";

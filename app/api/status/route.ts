@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { anyRunningRun, discoverBarCounts } from "@/lib/discover";
-import { isShanghaiTradingDay } from "@/lib/eastmoney";
+import { getMarketData } from "@/lib/market-data";
 import { lastCompletedPollAt } from "@/lib/poll";
 import { isTradingSession } from "@/lib/session";
 import { getSupabase } from "@/lib/supabase";
@@ -48,7 +48,7 @@ export async function GET() {
     let tradingDay = false;
     let tradingDayError: string | null = null;
     try {
-      tradingDay = await isShanghaiTradingDay();
+      tradingDay = await getMarketData().isShanghaiTradingDay();
     } catch (e) {
       tradingDayError = e instanceof Error ? e.message : "交易日判定失败";
     }
