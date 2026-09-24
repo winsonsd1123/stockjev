@@ -21,7 +21,7 @@ import {
   scoreIndexToProbability,
 } from "@/lib/jev";
 import { codeToMarket, limitPct, limitPrices, normalizeCode, toSecid } from "@/lib/market";
-import { buyGate, discoverCap, sellGate } from "@/lib/rules";
+import { buyGate, discoverCap, reconcilePool, sellGate } from "@/lib/rules";
 import { isTradingSession, shanghaiYmd } from "@/lib/session";
 
 describe("market", () => {
@@ -332,5 +332,151 @@ describe("jev parse", () => {
     const s = parseScore(response, "excellence");
     expect(s.displayScore).toBe(90);
     expect(s.probability).toBeCloseTo(0.9);
+  });
+});
+
+describe("reconcilePool", () => {
+  const base = {
+    id: 1,
+    market: "sh",
+    code: "600000",
+    starred: false,
+    bearStreak: 0,
+    score: 80,
+  };
+
+  it("keeps a healthy system stock and does not replace it", () => {
+    const result = reconcilePool({
+      pool: [base],
+      trends: [{ id: 1, maAlign: "bull" }],
+      suggestions: [
+        {
+          market: "sz",
+          code: "000001",
+          name: "新票",
+          score: 99,
+          maAlign: "bull",
+          capped: false,
+        },
+      ],
+      previousCodes: ["sz:000001"],
+    });
+    expect(result.removeIds).toEqual([]);
+    expect(result.inserts.map((row) => row.code)).toEqual(["000001"]);
+    expect(result.trendUpdates).toEqual([
+      { id: 1, bearStreak: 0, trendTag: null },
+    ]);
+  });
+
+  it("removes an unstarred stock only on the second bear check", () => {
+    const once = reconcilePool({
+      pool: [base],
+      trends: [{ id: 1, maAlign: "bear" }],
+      suggestions: [],
+      previousCodes: [],
+    });
+    expect(once.removeIds).toEqual([]);
+    expect(once.trendUpdates[0]?.bearStreak).toBe(1);
+
+    const twice = reconcilePool({
+      pool: [{ ...base, bearStreak: 1 }],
+      trends: [{ id: 1, maAlign: "bear" }],
+      suggestions: [],
+      previousCodes: [],
+    });
+    expect(twice.removeIds).toEqual([1]);
+  });
+
+  it("flags a starred stock instead of removing it", () => {
+    const result = reconcilePool({
+      pool: [{ ...base, starred: true }],
+      trends: [{ id: 1, maAlign: "bear" }],
+      suggestions: [],
+      previousCodes: [],
+    });
+    expect(result.removeIds).toEqual([]);
+    expect(result.trendUpdates).toEqual([
+      { id: 1, bearStreak: 0, trendTag: "趋势已破" },
+    ]);
+  });
+
+  it("fills only the intersection of two rounds", () => {
+    const suggestion = {
+      market: "sz",
+      code: "000001",
+      name: "平安",
+      score: 90,
+      maAlign: "bull" as const,
+      capped: false,
+    };
+    const missed = reconcilePool({
+      pool: [],
+      trends: [],
+      suggestions: [suggestion],
+      previousCodes: [],
+    });
+    expect(missed.inserts).toEqual([]);
+    expect(missed.statuses[0]?.status).toBe("待第二轮");
+
+    const hit = reconcilePool({
+      pool: [],
+      trends: [],
+      suggestions: [suggestion],
+      previousCodes: ["sz:000001"],
+    });
+    expect(hit.inserts).toEqual([
+      { market: "sz", code: "000001", name: "平安", score: 90 },
+    ]);
+    expect(hit.statuses[0]?.status).toBe("本轮可补入");
+  });
+
+  it("does not insert past the system cap or when capped or not bull", () => {
+    const pool = Array.from({ length: 10 }, (_, i) => ({
+      ...base,
+      id: i + 1,
+      code: String(600000 + i),
+    }));
+    const full = reconcilePool({
+      pool,
+      trends: pool.map((row) => ({ id: row.id, maAlign: "bull" as const })),
+      suggestions: [
+        {
+          market: "sz",
+          code: "000001",
+          name: "新票",
+          score: 99,
+          maAlign: "bull",
+          capped: false,
+        },
+      ],
+      previousCodes: ["sz:000001"],
+    });
+    expect(full.inserts).toEqual([]);
+    expect(full.statuses[0]?.status).toBe("系统池已满");
+
+    const blocked = reconcilePool({
+      pool: [],
+      trends: [],
+      suggestions: [
+        {
+          market: "sz",
+          code: "000001",
+          name: "新票",
+          score: 99,
+          maAlign: "mixed",
+          capped: false,
+        },
+        {
+          market: "sz",
+          code: "000002",
+          name: "封顶",
+          score: 99,
+          maAlign: "bull",
+          capped: true,
+        },
+      ],
+      previousCodes: ["sz:000001", "sz:000002"],
+    });
+    expect(blocked.inserts).toEqual([]);
   });
 });

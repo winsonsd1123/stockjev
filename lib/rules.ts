@@ -122,3 +122,135 @@ export function applyCap(probability: number, cap?: number): number {
   if (cap == null) return probability;
   return Math.min(probability, cap);
 }
+
+export const SYSTEM_POOL_CAP = 10;
+export const TREND_BROKEN_TAG = "趋势已破";
+
+export type PoolAlign = "bull" | "bear" | "mixed";
+
+export type PoolMember = {
+  id: number;
+  market: string;
+  code: string;
+  starred: boolean;
+  bearStreak: number;
+  score: number | null;
+};
+
+export type PoolSuggestion = {
+  market: string;
+  code: string;
+  name: string;
+  score: number;
+  maAlign: PoolAlign;
+  capped: boolean;
+};
+
+export type SuggestionStatus =
+  | "已标星"
+  | "已在系统池"
+  | "待第二轮"
+  | "本轮可补入"
+  | "系统池已满";
+
+export type ReconcileResult = {
+  removeIds: number[];
+  scoreUpdates: { id: number; score: number }[];
+  trendUpdates: { id: number; bearStreak: number; trendTag: string | null }[];
+  inserts: { market: string; code: string; name: string; score: number }[];
+  statuses: { market: string; code: string; status: SuggestionStatus }[];
+};
+
+function poolKey(market: string, code: string): string {
+  return `${market}:${code}`;
+}
+
+/** 系统池：健康不替换；无星连续两次 bear 移出；空位只补连续两轮且多头、未封顶的建议。 */
+export function reconcilePool(input: {
+  pool: PoolMember[];
+  trends: { id: number; maAlign: PoolAlign }[];
+  suggestions: PoolSuggestion[];
+  previousCodes: string[];
+}): ReconcileResult {
+  const trendById = new Map(input.trends.map((t) => [t.id, t.maAlign]));
+  const removeIds: number[] = [];
+  const trendUpdates: ReconcileResult["trendUpdates"] = [];
+
+  for (const row of input.pool) {
+    const align = trendById.get(row.id);
+    if (align == null) continue;
+    if (row.starred) {
+      trendUpdates.push({
+        id: row.id,
+        bearStreak: row.bearStreak,
+        trendTag: align === "bear" ? TREND_BROKEN_TAG : null,
+      });
+      continue;
+    }
+    if (align === "bear") {
+      const streak = row.bearStreak + 1;
+      if (streak >= 2) removeIds.push(row.id);
+      else trendUpdates.push({ id: row.id, bearStreak: streak, trendTag: null });
+    } else {
+      trendUpdates.push({ id: row.id, bearStreak: 0, trendTag: null });
+    }
+  }
+
+  const removed = new Set(removeIds);
+  const scoreByKey = new Map(
+    input.suggestions.map((s) => [poolKey(s.market, s.code), s.score])
+  );
+  const scoreUpdates: ReconcileResult["scoreUpdates"] = [];
+  for (const row of input.pool) {
+    if (removed.has(row.id)) continue;
+    const score = scoreByKey.get(poolKey(row.market, row.code));
+    if (score == null) continue;
+    scoreUpdates.push({ id: row.id, score });
+  }
+
+  const alive = input.pool.filter((row) => !removed.has(row.id));
+  const aliveKeys = new Set(alive.map((row) => poolKey(row.market, row.code)));
+  let vacancies = Math.max(
+    0,
+    SYSTEM_POOL_CAP - alive.filter((row) => !row.starred).length
+  );
+  const prev = new Set(input.previousCodes);
+  const inserts: ReconcileResult["inserts"] = [];
+  for (const s of input.suggestions) {
+    if (vacancies <= 0) break;
+    const key = poolKey(s.market, s.code);
+    if (aliveKeys.has(key) || !prev.has(key)) continue;
+    if (s.maAlign !== "bull" || s.capped) continue;
+    inserts.push({
+      market: s.market,
+      code: s.code,
+      name: s.name,
+      score: s.score,
+    });
+    aliveKeys.add(key);
+    vacancies -= 1;
+  }
+
+  const insertKeys = new Set(inserts.map((row) => poolKey(row.market, row.code)));
+  const starredKeys = new Set(
+    alive.filter((row) => row.starred).map((row) => poolKey(row.market, row.code))
+  );
+  const systemKeys = new Set(
+    alive.filter((row) => !row.starred).map((row) => poolKey(row.market, row.code))
+  );
+  const systemAfter =
+    alive.filter((row) => !row.starred).length + inserts.length;
+  const statuses = input.suggestions.map((s) => {
+    const key = poolKey(s.market, s.code);
+    let status: SuggestionStatus;
+    if (starredKeys.has(key)) status = "已标星";
+    else if (insertKeys.has(key)) status = "本轮可补入";
+    else if (systemKeys.has(key)) status = "已在系统池";
+    else if (!prev.has(key) || s.maAlign !== "bull" || s.capped) status = "待第二轮";
+    else if (systemAfter >= SYSTEM_POOL_CAP) status = "系统池已满";
+    else status = "待第二轮";
+    return { market: s.market, code: s.code, status };
+  });
+
+  return { removeIds, scoreUpdates, trendUpdates, inserts, statuses };
+}

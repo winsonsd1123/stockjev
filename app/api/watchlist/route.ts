@@ -21,6 +21,9 @@ export async function GET() {
       entryPrice: row.entry_price,
       lastPrice: row.last_price,
       latestBuyTag: row.latest_buy_tag,
+      starred: Boolean(row.starred),
+      bearStreak: Number(row.bear_streak ?? 0),
+      trendTag: row.trend_tag ?? null,
       judgments: [] as unknown[],
     }));
 
@@ -48,6 +51,7 @@ export async function POST(req: Request) {
           code: stock.code,
           name: stock.name,
           source: "manual",
+          starred: true,
           score: body.score ?? null,
           entry_price: stock.price > 0 ? stock.price : null,
         },
@@ -61,6 +65,37 @@ export async function POST(req: Request) {
     const msg = e instanceof Error ? e.message : "watchlist add error";
     const status = msg.includes("找不到") || msg.includes("须为") ? 400 : 500;
     return NextResponse.json({ error: msg }, { status });
+  }
+}
+
+export async function PATCH(req: Request) {
+  try {
+    const body = (await req.json()) as { id?: number; starred?: boolean };
+    if (body.id == null || typeof body.starred !== "boolean") {
+      return NextResponse.json({ error: "缺少 id 或 starred" }, { status: 400 });
+    }
+    const sb = getSupabase();
+    if (!body.starred) {
+      const { count, error: countError } = await sb
+        .from("watchlist")
+        .select("id", { count: "exact", head: true })
+        .eq("starred", false);
+      if (countError) throw countError;
+      if ((count ?? 0) >= 10) {
+        return NextResponse.json({ error: "系统池已满" }, { status: 409 });
+      }
+    }
+    const { data, error } = await sb
+      .from("watchlist")
+      .update({ starred: body.starred })
+      .eq("id", body.id)
+      .select("*")
+      .single();
+    if (error) throw error;
+    return NextResponse.json({ item: data });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "watchlist star error";
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
 }
 

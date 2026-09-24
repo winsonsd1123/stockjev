@@ -21,6 +21,9 @@ export type WatchlistRow = {
   code: string;
   name: string;
   source: "ai" | "manual";
+  starred: boolean;
+  bear_streak: number;
+  trend_tag: string | null;
   score: number | null;
   entry_price: number | null;
   last_price: number | null;

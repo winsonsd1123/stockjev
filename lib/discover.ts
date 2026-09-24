@@ -14,7 +14,7 @@ import {
 import { buildExcellenceQuestion, parseNouls, parseScore } from "@/lib/jev";
 import { decide } from "@/lib/jev-client";
 import { limitPct, type Market } from "@/lib/market";
-import { discoverCap } from "@/lib/rules";
+import { discoverCap, reconcilePool, type PoolAlign } from "@/lib/rules";
 import { getSupabase } from "@/lib/supabase";
 
 export type Suggestion = {
@@ -22,6 +22,7 @@ export type Suggestion = {
   code: string;
   name: string;
   score: number;
+  status?: string;
 };
 
 export type DiscoverProgress = {
@@ -291,6 +292,151 @@ async function loadPage(
   return { items: page.items, done: false };
 }
 
+function asAlign(value: unknown): PoolAlign {
+  if (value === "bull" || value === "bear" || value === "mixed") return value;
+  return "mixed";
+}
+
+async function syncWatchPool(
+  runId: number,
+  rows: {
+    market: string;
+    code: string;
+    probability: number;
+    details: unknown;
+  }[]
+): Promise<{ suggestions: Suggestion[]; removed: number; inserted: number }> {
+  const sb = getSupabase();
+  const gated = rows.map((r) => {
+    const details = (r.details ?? {}) as {
+      name?: string;
+      features?: {
+        maAlign?: unknown;
+        ret20?: number | null;
+        pos20?: number | null;
+        limitUpCount20?: number;
+        bias20?: number | null;
+      };
+    };
+    const features = details.features;
+    const cap = discoverCap({
+      ret20: features?.ret20 ?? null,
+      pos20: features?.pos20 ?? null,
+      limitUpCount20: features?.limitUpCount20 ?? 0,
+      bias20: features?.bias20 ?? null,
+    });
+    return {
+      market: r.market,
+      code: r.code,
+      name: String(details.name ?? r.code),
+      score: Math.round(Number(r.probability) * 100),
+      maAlign: asAlign(features?.maAlign),
+      capped: cap.cap != null,
+    };
+  });
+
+  const { data: poolRows, error: poolError } = await sb
+    .from("watchlist")
+    .select("id,market,code,starred,bear_streak,score");
+  if (poolError) throw poolError;
+
+  const trends: { id: number; maAlign: PoolAlign }[] = [];
+  for (const row of poolRows ?? []) {
+    try {
+      const bars = await getMarketData().fetchDailyKlines(
+        row.market as Market,
+        row.code as string,
+        120
+      );
+      if (bars.length === 0) continue;
+      trends.push({
+        id: row.id as number,
+        maAlign: deriveDailyFeatures(bars).maAlign,
+      });
+    } catch {
+      continue;
+    }
+  }
+
+  const { data: prevRun } = await sb
+    .from("runs")
+    .select("progress")
+    .eq("type", "discover")
+    .eq("status", "completed")
+    .neq("id", runId)
+    .order("finished_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const prevSuggestions =
+    (prevRun?.progress as { suggestions?: { market?: string; code?: string }[] } | null)
+      ?.suggestions ?? [];
+  const previousCodes = prevSuggestions
+    .filter((s) => s.market && s.code)
+    .map((s) => `${s.market}:${s.code}`);
+
+  const plan = reconcilePool({
+    pool: (poolRows ?? []).map((row) => ({
+      id: row.id as number,
+      market: row.market as string,
+      code: row.code as string,
+      starred: Boolean(row.starred),
+      bearStreak: Number(row.bear_streak ?? 0),
+      score: row.score == null ? null : Number(row.score),
+    })),
+    trends,
+    suggestions: gated,
+    previousCodes,
+  });
+
+  if (plan.removeIds.length > 0) {
+    const { error } = await sb.from("watchlist").delete().in("id", plan.removeIds);
+    if (error) throw error;
+  }
+  for (const update of plan.trendUpdates) {
+    const { error } = await sb
+      .from("watchlist")
+      .update({ bear_streak: update.bearStreak, trend_tag: update.trendTag })
+      .eq("id", update.id);
+    if (error) throw error;
+  }
+  for (const update of plan.scoreUpdates) {
+    const { error } = await sb
+      .from("watchlist")
+      .update({ score: update.score })
+      .eq("id", update.id);
+    if (error) throw error;
+  }
+  for (const row of plan.inserts) {
+    const stock = await getMarketData().resolveStock(row.code);
+    const { error } = await sb.from("watchlist").insert({
+      market: row.market,
+      code: row.code,
+      name: row.name,
+      source: "ai",
+      starred: false,
+      score: row.score,
+      entry_price: stock.price > 0 ? stock.price : null,
+    });
+    if (error) throw error;
+  }
+
+  const statusByKey = new Map(
+    plan.statuses.map((s) => [`${s.market}:${s.code}`, s.status])
+  );
+  const suggestions: Suggestion[] = gated.map((s) => ({
+    market: s.market as Market,
+    code: s.code,
+    name: s.name,
+    score: s.score,
+    status: statusByKey.get(`${s.market}:${s.code}`),
+  }));
+  return {
+    suggestions,
+    removed: plan.removeIds.length,
+    inserted: plan.inserts.length,
+  };
+}
+
 export async function stepDiscover(runId?: number): Promise<StepResult> {
   const sb = getSupabase();
   let run;
@@ -385,16 +531,20 @@ export async function stepDiscover(runId?: number): Promise<StepResult> {
       .limit(10);
     if (error) throw error;
 
-    const suggestions: Suggestion[] = (rows ?? []).map((r) => ({
-      market: r.market as Market,
-      code: r.code as string,
-      name: String((r.details as { name?: string })?.name ?? r.code),
-      score: Math.round(Number(r.probability) * 100),
-    }));
+    const synced = await syncWatchPool(
+      run.id as number,
+      (rows ?? []).map((r) => ({
+        market: r.market as string,
+        code: r.code as string,
+        probability: Number(r.probability),
+        details: r.details,
+      }))
+    );
+    const suggestions = synced.suggestions;
     progress.suggestions = suggestions;
     await completeRun(run.id as number, progress);
     console.log(
-      `[discover] done scored=${progress.scored} suggestions=${suggestions.length}`
+      `[discover] done scored=${progress.scored} suggestions=${suggestions.length} removed=${synced.removed} inserted=${synced.inserted}`
     );
     const scanned = progress.scored + progress.skipped;
     return {
@@ -403,12 +553,12 @@ export async function stepDiscover(runId?: number): Promise<StepResult> {
       total: scanned,
       runId: run.id as number,
       phase: "commit",
-      message: `发现完成，建议纳入 ${suggestions.length} 只`,
+      message: `发现完成，移出 ${synced.removed}，补入 ${synced.inserted}`,
       events: [
         ...events,
         {
           level: "info",
-          text: `发现完成，打分 ${progress.scored}，跳过 ${progress.skipped}`,
+          text: `发现完成，打分 ${progress.scored}，跳过 ${progress.skipped}，移出 ${synced.removed}，补入 ${synced.inserted}`,
         },
         ...suggestions.map((s, i) => ({
           level: "ok" as const,

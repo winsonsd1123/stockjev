@@ -14,6 +14,8 @@ type WatchItem = {
   latestBuyProbability: number | null;
   latestBuyAt: string | null;
   latestBuyTag: string | null;
+  starred?: boolean;
+  trendTag?: string | null;
 };
 
 type HoldingItem = {
@@ -34,6 +36,7 @@ type Suggestion = {
   code: string;
   name: string;
   score: number;
+  status?: string;
 };
 
 type Status = {
@@ -312,6 +315,7 @@ export default function HomePage() {
       try {
         let done = false;
         let currentRunId = runId;
+        let lastMessage = "";
         while (!done) {
           setTaskMessage(
             type === "discover" ? "正在推进发现…" : "正在推进盘中判定…"
@@ -333,7 +337,10 @@ export default function HomePage() {
           };
           if (type === "discover") setDiscoverProgress(next);
           else setPollProgress(next);
-          if (json.message) setTaskMessage(json.message);
+          if (json.message) {
+            lastMessage = json.message;
+            setTaskMessage(json.message);
+          }
           if (Array.isArray(json.events) && json.events.length > 0) {
             if (type === "discover") {
               setDiscoverLog((prev) => [...prev, ...json.events].slice(-200));
@@ -348,8 +355,9 @@ export default function HomePage() {
           done = Boolean(json.done);
         }
         if (type === "discover") {
-          setTaskMessage("发现完成");
-          showToast("ok", "建议已生成");
+          const doneText = lastMessage || "发现完成";
+          setTaskMessage(doneText);
+          showToast("ok", doneText);
         } else {
           setTaskMessage("盘中判定完成");
           showToast("ok", "盘中判定完成");
@@ -572,6 +580,30 @@ export default function HomePage() {
       await refreshLists();
     } catch (e) {
       showToast("fail", e instanceof Error ? e.message : "添加失败");
+    } finally {
+      setPendingAction(null);
+    }
+  }
+
+  async function onToggleStar(id: number, starred: boolean) {
+    const key = `star:${id}`;
+    if (pendingAction) return;
+    setPendingAction(key);
+    try {
+      const res = await fetch("/api/watchlist", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, starred }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showToast("fail", json.error ?? "标星失败");
+        return;
+      }
+      showToast("ok", starred ? "已标星" : "已取消标星");
+      await refreshLists();
+    } catch (e) {
+      showToast("fail", e instanceof Error ? e.message : "标星失败");
     } finally {
       setPendingAction(null);
     }
@@ -851,6 +883,7 @@ export default function HomePage() {
               <table className="w-full min-w-[720px] text-left text-sm">
                 <thead className="border-b text-zinc-500">
                   <tr>
+                    <th className="py-2 pr-2">星标</th>
                     <th className="py-2 pr-2">代码</th>
                     <th className="py-2 pr-2">名称</th>
                     <th className="py-2 pr-2">入池价</th>
@@ -863,7 +896,7 @@ export default function HomePage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {listsStatus === "loading" && <SkeletonRows cols={9} />}
+                  {listsStatus === "loading" && <SkeletonRows cols={10} />}
                   {listsStatus === "ready" &&
                     watchlist.map((row) => (
                       <tr
@@ -872,8 +905,29 @@ export default function HomePage() {
                           highlightWatchIds.has(row.id) ? rowHighlight : ""
                         }`}
                       >
+                        <td className="py-2 pr-2">
+                          <button
+                            type="button"
+                            className="disabled:opacity-50"
+                            disabled={Boolean(pendingAction)}
+                            onClick={() => void onToggleStar(row.id, !row.starred)}
+                          >
+                            {pendingAction === `star:${row.id}`
+                              ? "…"
+                              : row.starred
+                                ? "★"
+                                : "☆"}
+                          </button>
+                        </td>
                         <td className="py-2 pr-2 font-mono">{row.code}</td>
-                        <td className="py-2 pr-2">{row.name}</td>
+                        <td className="py-2 pr-2">
+                          {row.name}
+                          {row.trendTag ? (
+                            <span className="ml-2 text-amber-700 dark:text-amber-400">
+                              {row.trendTag}
+                            </span>
+                          ) : null}
+                        </td>
                         <td className="py-2 pr-2">{money(row.entryPrice)}</td>
                         <td className="py-2 pr-2">{money(row.lastPrice)}</td>
                         <td className="py-2 pr-2">{row.score ?? "—"}</td>
@@ -926,7 +980,7 @@ export default function HomePage() {
                   {listsStatus === "ready" && watchlist.length === 0 && (
                     <tr>
                       <td
-                        colSpan={9}
+                        colSpan={10}
                         className="py-6 text-center text-zinc-400"
                       >
                         暂无观察池股票
@@ -1251,6 +1305,7 @@ export default function HomePage() {
                       <th className="py-2 pr-2">代码</th>
                       <th className="py-2 pr-2">名称</th>
                       <th className="py-2 pr-2">AI分</th>
+                      <th className="py-2 pr-2">状态</th>
                       <th className="py-2">操作</th>
                     </tr>
                   </thead>
@@ -1258,12 +1313,17 @@ export default function HomePage() {
                     {suggestions.map((s, i) => {
                       const sKey = `${s.market}:${s.code}`;
                       const pendingKey = `s:${s.code}`;
-                      const added =
-                        addedSuggestionKeys.has(sKey) ||
-                        watchlist.some(
-                          (w) => w.market === s.market && w.code === s.code
-                        );
+                      const inPool = watchlist.find(
+                        (w) => w.market === s.market && w.code === s.code
+                      );
+                      const starred =
+                        Boolean(inPool?.starred) || addedSuggestionKeys.has(sKey);
                       const pending = pendingAction === pendingKey;
+                      const status = starred
+                        ? "已标星"
+                        : inPool
+                          ? "已在系统池"
+                          : (s.status ?? "待第二轮");
                       return (
                         <tr
                           key={sKey}
@@ -1273,9 +1333,10 @@ export default function HomePage() {
                           <td className="py-2 pr-2 font-mono">{s.code}</td>
                           <td className="py-2 pr-2">{s.name}</td>
                           <td className="py-2 pr-2">{s.score}</td>
+                          <td className="py-2 pr-2 text-zinc-500">{status}</td>
                           <td className="py-2">
-                            {added ? (
-                              <span className="text-zinc-400">已加入 ✓</span>
+                            {starred ? (
+                              <span className="text-zinc-400">已标星</span>
                             ) : (
                               <button
                                 type="button"
@@ -1283,7 +1344,7 @@ export default function HomePage() {
                                 disabled={Boolean(pendingAction) || busy}
                                 onClick={() => void onAddWatch(s.code, s.score)}
                               >
-                                {pending ? "加入中…" : "加入观察池"}
+                                {pending ? "标星中…" : "标星"}
                               </button>
                             )}
                           </td>
