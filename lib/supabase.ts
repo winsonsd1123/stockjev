@@ -23,6 +23,7 @@ export type WatchlistRow = {
   source: "ai" | "manual";
   score: number | null;
   entry_price: number | null;
+  last_price: number | null;
   latest_buy_probability: number | null;
   latest_buy_at: string | null;
   added_at: string;
@@ -35,6 +36,7 @@ export type HoldingRow = {
   name: string;
   quantity: number;
   entry_price: number | null;
+  last_price: number | null;
   latest_sell_probability: number | null;
   latest_sell_at: string | null;
   added_at: string;

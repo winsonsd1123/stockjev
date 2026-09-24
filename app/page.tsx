@@ -10,6 +10,7 @@ type WatchItem = {
   source: "ai" | "manual";
   score: number | null;
   entryPrice: number | null;
+  lastPrice: number | null;
   latestBuyProbability: number | null;
   latestBuyAt: string | null;
 };
@@ -21,6 +22,7 @@ type HoldingItem = {
   name: string;
   quantity: number;
   entryPrice: number | null;
+  lastPrice: number | null;
   latestSellProbability: number | null;
   latestSellAt: string | null;
 };
@@ -176,12 +178,12 @@ export default function HomePage() {
   const bootstrapped = useRef(false);
   const listsReady = useRef(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const watchPrev = useRef<Map<number, { p: number | null; at: string | null }>>(
-    new Map()
-  );
-  const holdPrev = useRef<Map<number, { p: number | null; at: string | null }>>(
-    new Map()
-  );
+  const watchPrev = useRef<
+    Map<number, { p: number | null; at: string | null; price: number | null }>
+  >(new Map());
+  const holdPrev = useRef<
+    Map<number, { p: number | null; at: string | null; price: number | null }>
+  >(new Map());
   const discoverLogRef = useRef<HTMLDivElement>(null);
   const pollLogRef = useRef<HTMLDivElement>(null);
 
@@ -203,7 +205,9 @@ export default function HomePage() {
           const prev = watchPrev.current.get(row.id);
           if (
             prev &&
-            (prev.p !== row.latestBuyProbability || prev.at !== row.latestBuyAt)
+            (prev.p !== row.latestBuyProbability ||
+              prev.at !== row.latestBuyAt ||
+              prev.price !== row.lastPrice)
           ) {
             changed.add(row.id);
           }
@@ -216,7 +220,7 @@ export default function HomePage() {
       watchPrev.current = new Map(
         items.map((r) => [
           r.id,
-          { p: r.latestBuyProbability, at: r.latestBuyAt },
+          { p: r.latestBuyProbability, at: r.latestBuyAt, price: r.lastPrice },
         ])
       );
       setWatchlist(items);
@@ -233,7 +237,8 @@ export default function HomePage() {
           if (
             prev &&
             (prev.p !== row.latestSellProbability ||
-              prev.at !== row.latestSellAt)
+              prev.at !== row.latestSellAt ||
+              prev.price !== row.lastPrice)
           ) {
             changed.add(row.id);
           }
@@ -246,7 +251,11 @@ export default function HomePage() {
       holdPrev.current = new Map(
         items.map((r) => [
           r.id,
-          { p: r.latestSellProbability, at: r.latestSellAt },
+          {
+            p: r.latestSellProbability,
+            at: r.latestSellAt,
+            price: r.lastPrice,
+          },
         ])
       );
       setHoldings(items);
@@ -643,12 +652,12 @@ export default function HomePage() {
             disabled={busy}
             className="rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
           >
-            {discoverBusy ? "运行中…" : busy ? "忙碌中…" : "发现"}
+            {discoverBusy ? "运行中…" : "发现"}
           </button>
           <div className="min-w-[200px] flex-1">
             <div className="mb-1 flex justify-between text-xs text-zinc-500">
               <span>
-                {discoverBusy || discoverProgress.label
+                {discoverBusy
                   ? discoverProgress.label || "发现进度"
                   : "发现进度"}
               </span>
@@ -871,6 +880,7 @@ export default function HomePage() {
                 <th className="py-2 pr-2">代码</th>
                 <th className="py-2 pr-2">名称</th>
                 <th className="py-2 pr-2">入池价</th>
+                <th className="py-2 pr-2">现价</th>
                 <th className="py-2 pr-2">AI分</th>
                 <th className="py-2 pr-2">买入概率</th>
                 <th className="py-2 pr-2">更新时间</th>
@@ -878,7 +888,7 @@ export default function HomePage() {
               </tr>
             </thead>
             <tbody>
-              {listsStatus === "loading" && <SkeletonRows cols={7} />}
+              {listsStatus === "loading" && <SkeletonRows cols={8} />}
               {listsStatus === "ready" &&
                 watchlist.map((row) => (
                   <tr
@@ -890,6 +900,7 @@ export default function HomePage() {
                     <td className="py-2 pr-2 font-mono">{row.code}</td>
                     <td className="py-2 pr-2">{row.name}</td>
                     <td className="py-2 pr-2">{money(row.entryPrice)}</td>
+                    <td className="py-2 pr-2">{money(row.lastPrice)}</td>
                     <td className="py-2 pr-2">{row.score ?? "—"}</td>
                     <td className="py-2 pr-2">
                       {pct(row.latestBuyProbability)}
@@ -936,7 +947,7 @@ export default function HomePage() {
                 ))}
               {listsStatus === "ready" && watchlist.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="py-6 text-center text-zinc-400">
+                  <td colSpan={8} className="py-6 text-center text-zinc-400">
                     暂无观察池股票
                   </td>
                 </tr>
@@ -1006,13 +1017,14 @@ export default function HomePage() {
                 <th className="py-2 pr-2">名称</th>
                 <th className="py-2 pr-2">数量</th>
                 <th className="py-2 pr-2">入池价</th>
+                <th className="py-2 pr-2">现价</th>
                 <th className="py-2 pr-2">卖出概率</th>
                 <th className="py-2 pr-2">更新时间</th>
                 <th className="py-2">操作</th>
               </tr>
             </thead>
             <tbody>
-              {listsStatus === "loading" && <SkeletonRows cols={7} />}
+              {listsStatus === "loading" && <SkeletonRows cols={8} />}
               {listsStatus === "ready" &&
                 holdings.map((row) => (
                   <tr
@@ -1025,6 +1037,7 @@ export default function HomePage() {
                     <td className="py-2 pr-2">{row.name}</td>
                     <td className="py-2 pr-2">{row.quantity}</td>
                     <td className="py-2 pr-2">{money(row.entryPrice)}</td>
+                    <td className="py-2 pr-2">{money(row.lastPrice)}</td>
                     <td className="py-2 pr-2">
                       {pct(row.latestSellProbability)}
                     </td>
@@ -1070,7 +1083,7 @@ export default function HomePage() {
                 ))}
               {listsStatus === "ready" && holdings.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="py-6 text-center text-zinc-400">
+                  <td colSpan={8} className="py-6 text-center text-zinc-400">
                     暂无持仓
                   </td>
                 </tr>

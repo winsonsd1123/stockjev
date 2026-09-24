@@ -19,6 +19,7 @@ export async function GET() {
       latestBuyProbability: row.latest_buy_probability,
       latestBuyAt: row.latest_buy_at,
       entryPrice: row.entry_price,
+      lastPrice: row.last_price,
       judgments: [] as unknown[],
     }));
 

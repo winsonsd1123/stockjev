@@ -242,6 +242,8 @@ export async function stepPoll(runId?: number): Promise<StepResult> {
         continue;
       }
       const quote = quoteMap.get(`${item.market}:${item.code}`);
+      const pricePatch =
+        quote && quote.price > 0 ? { last_price: quote.price } : {};
       const parsed = await judgeOne(
         item,
         progress.context,
@@ -256,6 +258,7 @@ export async function stepPoll(runId?: number): Promise<StepResult> {
           .update({
             latest_buy_probability: parsed.probability,
             latest_buy_at: nowIso,
+            ...pricePatch,
           })
           .eq("market", item.market)
           .eq("code", item.code);
@@ -265,6 +268,7 @@ export async function stepPoll(runId?: number): Promise<StepResult> {
           .update({
             latest_sell_probability: parsed.probability,
             latest_sell_at: nowIso,
+            ...pricePatch,
           })
           .eq("market", item.market)
           .eq("code", item.code);
