@@ -13,6 +13,7 @@ type WatchItem = {
   lastPrice: number | null;
   latestBuyProbability: number | null;
   latestBuyAt: string | null;
+  latestBuyTag: string | null;
 };
 
 type HoldingItem = {
@@ -25,6 +26,7 @@ type HoldingItem = {
   lastPrice: number | null;
   latestSellProbability: number | null;
   latestSellAt: string | null;
+  latestSellTag: string | null;
 };
 
 type Suggestion = {
@@ -103,6 +105,14 @@ function validateCode(raw: string): string | null {
   return null;
 }
 
+function validateCost(raw: string): string | null {
+  const text = raw.trim();
+  if (!text) return null;
+  const n = Number(text);
+  if (!Number.isFinite(n) || n <= 0) return "成本价须为正数";
+  return null;
+}
+
 function validateQty(raw: string): string | null {
   if (!/^\d+$/.test(raw.trim()) || Number(raw) <= 0) {
     return "数量须为正整数";
@@ -159,6 +169,7 @@ export default function HomePage() {
   const [addCodeError, setAddCodeError] = useState("");
   const [holdCode, setHoldCode] = useState("");
   const [holdQty, setHoldQty] = useState("100");
+  const [holdCost, setHoldCost] = useState("");
   const [holdError, setHoldError] = useState("");
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [confirmDiscover, setConfirmDiscover] = useState(false);
@@ -590,8 +601,9 @@ export default function HomePage() {
   async function onAddHolding() {
     const codeErr = validateCode(holdCode);
     const qtyErr = validateQty(holdQty);
-    if (codeErr || qtyErr) {
-      setHoldError(codeErr ?? qtyErr ?? "");
+    const costErr = validateCost(holdCost);
+    if (codeErr || qtyErr || costErr) {
+      setHoldError(codeErr ?? qtyErr ?? costErr ?? "");
       return;
     }
     if (pendingAction) return;
@@ -604,6 +616,7 @@ export default function HomePage() {
         body: JSON.stringify({
           code: holdCode.trim(),
           quantity: Number(holdQty),
+          entryPrice: holdCost.trim() ? Number(holdCost) : null,
         }),
       });
       const json = await res.json();
@@ -612,6 +625,7 @@ export default function HomePage() {
         return;
       }
       setHoldCode("");
+      setHoldCost("");
       showToast(
         "ok",
         `已录入持仓 ${json.item.code} ${json.item.name ?? ""}`.trim()
@@ -843,12 +857,13 @@ export default function HomePage() {
                     <th className="py-2 pr-2">现价</th>
                     <th className="py-2 pr-2">AI分</th>
                     <th className="py-2 pr-2">买入概率</th>
+                    <th className="py-2 pr-2">标记</th>
                     <th className="py-2 pr-2">更新时间</th>
                     <th className="py-2">操作</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {listsStatus === "loading" && <SkeletonRows cols={8} />}
+                  {listsStatus === "loading" && <SkeletonRows cols={9} />}
                   {listsStatus === "ready" &&
                     watchlist.map((row) => (
                       <tr
@@ -865,6 +880,7 @@ export default function HomePage() {
                         <td className="py-2 pr-2">
                           {pct(row.latestBuyProbability)}
                         </td>
+                        <td className="py-2 pr-2">{row.latestBuyTag ?? "—"}</td>
                         <td className="py-2 pr-2">
                           {fmtTime(row.latestBuyAt)}
                         </td>
@@ -910,7 +926,7 @@ export default function HomePage() {
                   {listsStatus === "ready" && watchlist.length === 0 && (
                     <tr>
                       <td
-                        colSpan={8}
+                        colSpan={9}
                         className="py-6 text-center text-zinc-400"
                       >
                         暂无观察池股票
@@ -960,6 +976,23 @@ export default function HomePage() {
                 disabled={Boolean(pendingAction)}
                 className="w-24 rounded-lg border border-zinc-300 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900"
               />
+              <input
+                value={holdCost}
+                onChange={(e) => {
+                  setHoldCost(e.target.value.replace(/[^\d.]/g, ""));
+                  if (holdError) setHoldError("");
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void onAddHolding();
+                  }
+                }}
+                placeholder="成本价(可选)"
+                inputMode="decimal"
+                disabled={Boolean(pendingAction)}
+                className="w-28 rounded-lg border border-zinc-300 px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900"
+              />
               <button
                 type="button"
                 onClick={() => void onAddHolding()}
@@ -984,12 +1017,13 @@ export default function HomePage() {
                     <th className="py-2 pr-2">入池价</th>
                     <th className="py-2 pr-2">现价</th>
                     <th className="py-2 pr-2">卖出概率</th>
+                    <th className="py-2 pr-2">标记</th>
                     <th className="py-2 pr-2">更新时间</th>
                     <th className="py-2">操作</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {listsStatus === "loading" && <SkeletonRows cols={8} />}
+                  {listsStatus === "loading" && <SkeletonRows cols={9} />}
                   {listsStatus === "ready" &&
                     holdings.map((row) => (
                       <tr
@@ -1006,6 +1040,7 @@ export default function HomePage() {
                         <td className="py-2 pr-2">
                           {pct(row.latestSellProbability)}
                         </td>
+                        <td className="py-2 pr-2">{row.latestSellTag ?? "—"}</td>
                         <td className="py-2 pr-2">
                           {fmtTime(row.latestSellAt)}
                         </td>
@@ -1051,7 +1086,7 @@ export default function HomePage() {
                   {listsStatus === "ready" && holdings.length === 0 && (
                     <tr>
                       <td
-                        colSpan={8}
+                        colSpan={9}
                         className="py-6 text-center text-zinc-400"
                       >
                         暂无持仓

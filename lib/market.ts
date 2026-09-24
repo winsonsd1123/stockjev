@@ -32,3 +32,21 @@ export function normalizeCode(input: string): string {
   }
   return code;
 }
+
+/** 涨跌幅限制：创业板/科创板 20%，北交所 30%，其余 10% */
+export function limitPct(market: Market, code: string): number {
+  if (code.startsWith("30") || code.startsWith("68")) return 0.2;
+  if (market === "bj") return 0.3;
+  return 0.1;
+}
+
+/** 由昨收和板别比例得到涨停价、跌停价（四舍五入到分） */
+export function limitPrices(
+  prevClose: number,
+  pct: number
+): { up: number; down: number } {
+  return {
+    up: Math.round(prevClose * (1 + pct) * 100) / 100,
+    down: Math.round(prevClose * (1 - pct) * 100) / 100,
+  };
+}

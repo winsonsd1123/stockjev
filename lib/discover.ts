@@ -2,12 +2,21 @@ import {
   fetchDailyKlines,
   fetchEastmoneyPage,
   fetchSinaPage,
+  type KlineBar,
   type MarketSnapshot,
 } from "@/lib/eastmoney";
-import { deriveDailyFeatures, passesLiquidity5d, shouldScore } from "@/lib/filter";
-import { buildExcellenceQuestion, parseScore } from "@/lib/jev";
+import {
+  bucketCap,
+  bucketPb,
+  bucketPe,
+  deriveDailyFeatures,
+  passesLiquidity5d,
+  shouldScore,
+} from "@/lib/filter";
+import { buildExcellenceQuestion, parseNouls, parseScore } from "@/lib/jev";
 import { decide } from "@/lib/jev-client";
-import type { Market } from "@/lib/market";
+import { limitPct, type Market } from "@/lib/market";
+import { discoverCap } from "@/lib/rules";
 import { getSupabase } from "@/lib/supabase";
 
 export type Suggestion = {
@@ -28,6 +37,7 @@ export type DiscoverProgress = {
   skipped: number;
   failedCodes: string[];
   suggestions: Suggestion[];
+  indexBars: KlineBar[] | null;
 };
 
 export type StepEvent = {
@@ -76,6 +86,7 @@ function emptyProgress(): DiscoverProgress {
     skipped: 0,
     failedCodes: [],
     suggestions: [],
+    indexBars: null,
   };
 }
 
@@ -155,9 +166,15 @@ async function completeRun(runId: number, progress: DiscoverProgress) {
   if (error) throw error;
 }
 
+function roundNum(n: number | null): number | null {
+  if (n == null || !Number.isFinite(n)) return null;
+  return Math.round(n * 10000) / 10000;
+}
+
 async function scoreOne(
   runId: number,
-  snap: MarketSnapshot
+  snap: MarketSnapshot,
+  indexBars: KlineBar[] | null
 ): Promise<StepEvent> {
   const sb = getSupabase();
   const gate = shouldScore(snap);
@@ -170,7 +187,7 @@ async function scoreOne(
   }
 
   try {
-    const klines = await fetchDailyKlines(snap.market, snap.code, 20);
+    const klines = await fetchDailyKlines(snap.market, snap.code, 120);
     if (klines.length === 0) {
       console.log(`[discover] fail ${snap.code} 无日K`);
       return { level: "fail", text: `${snap.code} ${snap.name} 无日K，跳过` };
@@ -185,39 +202,65 @@ async function scoreOne(
         text: `${snap.code} ${snap.name} 跳过：${liq.reason}`,
       };
     }
-    const features = deriveDailyFeatures(klines);
+    const rawFeatures = deriveDailyFeatures(klines, {
+      limitPct: limitPct(snap.market, snap.code),
+      indexBars: indexBars ?? undefined,
+    });
+    const features = Object.fromEntries(
+      Object.entries(rawFeatures).map(([k, v]) => [
+        k,
+        typeof v === "number" ? roundNum(v) : v,
+      ])
+    );
     const state = {
       snapshot: {
         name: snap.name,
         market: snap.market,
         code: snap.code,
-        marketCap: snap.marketCap,
-        pe: snap.pe,
-        pb: snap.pb,
+        industry: snap.industry,
+        peBucket: bucketPe(snap.peTtm ?? snap.pe),
+        pbBucket: bucketPb(snap.pb),
+        capBucket: bucketCap(snap.marketCap),
         turnover: snap.turnover,
         volumeRatio: snap.volumeRatio,
-        changePct: snap.changePct,
-        amount: snap.amount,
+        change60Pct: snap.change60Pct,
       },
-      dailyKlines: klines,
       features,
     };
     const resp = await decide(state, buildExcellenceQuestion());
     const parsed = parseScore(resp, "excellence");
+    const parts = parseNouls(resp, ["overextended", "trendHealthy"]);
+    const cap = discoverCap(rawFeatures);
+    const capped =
+      cap.cap == null
+        ? parsed.probability
+        : Math.min(parsed.probability, cap.cap / 100);
+    const rank = Math.min(capped, parsed.probability * (1 - parts.overextended));
+    const display = Math.round(rank * 100);
     await sb.from("judgments").insert({
       run_id: runId,
       market: snap.market,
       code: snap.code,
       kind: "score",
-      probability: parsed.probability,
-      details: { ...parsed.details, name: snap.name },
+      probability: rank,
+      details: {
+        ...parsed.details,
+        name: snap.name,
+        features,
+        overextended: parts.overextended,
+        trendHealthy: parts.trendHealthy,
+        cap: cap.cap,
+        tag: cap.tag,
+        rawDisplayScore: parsed.displayScore,
+        displayScore: display,
+      },
     });
     console.log(
-      `[discover] score ${snap.code} ${snap.name} ${parsed.displayScore}`
+      `[discover] score ${snap.code} ${snap.name} raw=${parsed.displayScore} rank=${display}`
     );
     return {
       level: "ok",
-      text: `${snap.code} ${snap.name}  AI分 ${parsed.displayScore}`,
+      text: `${snap.code} ${snap.name}  AI分 ${display}${cap.tag ? `（${cap.tag}）` : ""}`,
     };
   } catch (e) {
     const reason = e instanceof Error ? e.message : "未知错误";
@@ -296,6 +339,13 @@ export async function stepDiscover(runId?: number): Promise<StepResult> {
 
   const progress = asProgress(run.progress);
   const events: StepEvent[] = [];
+  if (!progress.indexBars) {
+    try {
+      progress.indexBars = await fetchDailyKlines("sh", "000001", 120);
+    } catch {
+      progress.indexBars = [];
+    }
+  }
   let scoredThisStep = 0;
   let scannedThisStep = 0;
 
@@ -323,7 +373,7 @@ export async function stepDiscover(runId?: number): Promise<StepResult> {
         });
         continue;
       }
-      const ev = await scoreOne(run.id as number, snap);
+      const ev = await scoreOne(run.id as number, snap, progress.indexBars);
       events.push(ev);
       if (ev.level === "ok") {
         progress.scored += 1;

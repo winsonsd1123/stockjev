@@ -30,12 +30,16 @@ export type MarketSnapshot = {
   volume: number;
   changePct: number;
   amount: number;
-  turnover: number;
-  pe: number;
-  volumeRatio: number;
+  turnover: number | null;
+  pe: number | null;
+  volumeRatio: number | null;
   marketCap: number;
-  pb: number;
+  pb: number | null;
   listDate: number | null;
+  prevClose: number | null;
+  change60Pct: number | null;
+  industry: string | null;
+  peTtm: number | null;
 };
 
 export type KlineBar = {
@@ -55,11 +59,12 @@ export type QuoteLite = {
   price: number;
   changePct: number;
   volumeRatio: number;
-  turnover: number;
+  turnover: number | null;
   amount: number;
   open: number;
   high: number;
   low: number;
+  prevClose: number | null;
 };
 
 async function sleep(ms: number) {
@@ -129,6 +134,12 @@ function num(v: unknown, fallback = 0): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function numOrNull(v: unknown): number | null {
+  if (v == null || v === "-" || v === "") return null;
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 function parseListDate(v: unknown): number | null {
   if (v == null || v === "-" || v === "") return null;
   const n = Number(v);
@@ -159,12 +170,16 @@ function parseClistItem(item: Record<string, unknown>): MarketSnapshot {
     volume: num(item.f5),
     changePct: num(item.f3),
     amount: num(item.f6),
-    turnover: num(item.f8),
-    pe: num(item.f9),
-    volumeRatio: num(item.f10),
+    turnover: numOrNull(item.f8),
+    pe: numOrNull(item.f9),
+    volumeRatio: numOrNull(item.f10),
     marketCap: num(item.f20),
-    pb: num(item.f23),
+    pb: numOrNull(item.f23),
     listDate: parseListDate(item.f26),
+    prevClose: numOrNull(item.f18),
+    change60Pct: numOrNull(item.f24),
+    industry: item.f100 == null || item.f100 === "-" ? null : String(item.f100),
+    peTtm: numOrNull(item.f115),
   };
 }
 
@@ -248,7 +263,8 @@ async function fetchMinuteKlinesTencent(
 }
 
 const CLIST_FS = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048";
-const CLIST_FIELDS = "f2,f5,f12,f13,f14,f3,f6,f8,f9,f10,f20,f23,f26";
+const CLIST_FIELDS =
+  "f2,f5,f12,f13,f14,f3,f6,f8,f9,f10,f18,f20,f23,f24,f26,f100,f115";
 
 export async function fetchEastmoneyPage(
   page: number,
@@ -308,12 +324,16 @@ export async function fetchSinaPage(
       volume: num(row.volume),
       changePct: num(row.changepercent),
       amount: num(row.amount),
-      turnover: 0,
-      pe: 0,
-      volumeRatio: 0,
+      turnover: null,
+      pe: null,
+      volumeRatio: null,
       marketCap: 0,
-      pb: 0,
+      pb: null,
       listDate: null,
+      prevClose: null,
+      change60Pct: null,
+      industry: null,
+      peTtm: null,
     });
   }
   return out;
@@ -372,7 +392,7 @@ export async function fetchIndexContext(now: Date = new Date()): Promise<{
 }> {
   const [intraday5m, daily5] = await Promise.all([
     fetchIntraday5m("sh", "000001", now),
-    fetchDailyKlines("sh", "000001", 5),
+    fetchDailyKlines("sh", "000001", 120),
   ]);
   return { intraday5m, daily5 };
 }
@@ -396,7 +416,7 @@ export async function fetchQuotes(
   if (items.length === 0) return [];
   const secids = items.map((i) => toSecid(i.market, i.code)).join(",");
   const path =
-    `/api/qt/ulist.np/get?fltt=2&invt=2&fields=f12,f13,f14,f2,f3,f5,f6,f8,f10,f17,f15,f16&secids=${encodeURIComponent(secids)}`;
+    `/api/qt/ulist.np/get?fltt=2&invt=2&fields=f12,f13,f14,f2,f3,f5,f6,f8,f10,f17,f15,f16,f18,f24,f100,f115&secids=${encodeURIComponent(secids)}`;
   const json = (await emFetch(path, PUSH2_HOSTS)) as {
     data?: { diff?: Record<string, unknown>[] };
   };
@@ -409,11 +429,12 @@ export async function fetchQuotes(
       price: num(item.f2),
       changePct: num(item.f3),
       volumeRatio: num(item.f10),
-      turnover: num(item.f8),
+      turnover: numOrNull(item.f8),
       amount: num(item.f6),
       open: num(item.f17),
       high: num(item.f15),
       low: num(item.f16),
+      prevClose: numOrNull(item.f18),
     };
   });
 }

@@ -20,6 +20,7 @@ export async function GET() {
       latestSellAt: row.latest_sell_at,
       entryPrice: row.entry_price,
       lastPrice: row.last_price,
+      latestSellTag: row.latest_sell_tag,
       judgments: [] as unknown[],
     }));
 
@@ -32,13 +33,26 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
-    const body = (await req.json()) as { code?: string; quantity?: number };
+    const body = (await req.json()) as {
+      code?: string;
+      quantity?: number;
+      entryPrice?: number | null;
+    };
     const code = normalizeCode(body.code ?? "");
     const quantity = Number(body.quantity);
     if (!Number.isInteger(quantity) || quantity <= 0) {
       return NextResponse.json({ error: "数量须为正整数" }, { status: 400 });
     }
+    let entryPrice = null as number | null;
+    if (body.entryPrice != null && body.entryPrice !== ("" as unknown)) {
+      const n = Number(body.entryPrice);
+      if (!Number.isFinite(n) || n <= 0) {
+        return NextResponse.json({ error: "成本价须为正数" }, { status: 400 });
+      }
+      entryPrice = n;
+    }
     const stock = await resolveStock(code);
+    if (entryPrice == null && stock.price > 0) entryPrice = stock.price;
     const sb = getSupabase();
     const { data, error } = await sb
       .from("holdings")
@@ -48,7 +62,7 @@ export async function POST(req: Request) {
           code: stock.code,
           name: stock.name,
           quantity,
-          entry_price: stock.price > 0 ? stock.price : null,
+          entry_price: entryPrice,
         },
         { onConflict: "market,code" }
       )

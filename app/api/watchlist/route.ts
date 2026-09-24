@@ -20,6 +20,7 @@ export async function GET() {
       latestBuyAt: row.latest_buy_at,
       entryPrice: row.entry_price,
       lastPrice: row.last_price,
+      latestBuyTag: row.latest_buy_tag,
       judgments: [] as unknown[],
     }));
 

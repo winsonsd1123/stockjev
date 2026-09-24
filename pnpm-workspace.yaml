@@ -1,0 +1,10 @@
+allowBuilds:
+  esbuild: set this to true or false
+  unrs-resolver: set this to true or false
+minimumReleaseAgeExclude:
+  - '@supabase/auth-js@2.117.1'
+  - '@supabase/functions-js@2.117.1'
+  - '@supabase/postgrest-js@2.117.1'
+  - '@supabase/realtime-js@2.117.1'
+  - '@supabase/storage-js@2.117.1'
+  - '@supabase/supabase-js@2.117.1'

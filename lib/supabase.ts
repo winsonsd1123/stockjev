@@ -26,6 +26,7 @@ export type WatchlistRow = {
   last_price: number | null;
   latest_buy_probability: number | null;
   latest_buy_at: string | null;
+  latest_buy_tag: string | null;
   added_at: string;
 };
 
@@ -39,6 +40,7 @@ export type HoldingRow = {
   last_price: number | null;
   latest_sell_probability: number | null;
   latest_sell_at: string | null;
+  latest_sell_tag: string | null;
   added_at: string;
 };
 
