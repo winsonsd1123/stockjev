@@ -18,10 +18,16 @@ const HIS_HOSTS = [
   "https://91.push2his.eastmoney.com",
 ];
 
+const EM_MAX_INFLIGHT = 2;
+const EM_GAP_MS = 300;
+const EM_FAIL_WAIT_MS = 1000;
+
 export type MarketSnapshot = {
   market: Market;
   code: string;
   name: string;
+  price: number;
+  volume: number;
   changePct: number;
   amount: number;
   turnover: number;
@@ -42,35 +48,80 @@ export type KlineBar = {
   amount: number;
 };
 
+export type QuoteLite = {
+  market: Market;
+  code: string;
+  name: string;
+  price: number;
+  changePct: number;
+  volumeRatio: number;
+  turnover: number;
+  amount: number;
+  open: number;
+  high: number;
+  low: number;
+};
+
 async function sleep(ms: number) {
   await new Promise((r) => setTimeout(r, ms));
 }
 
-async function emFetch(pathAndQuery: string, hosts: string[]): Promise<unknown> {
-  let lastErr: unknown;
-  for (const host of hosts) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const res = await fetch(`${host}${pathAndQuery}`, {
-          headers: {
-            "User-Agent": UA,
-            Referer: "https://quote.eastmoney.com/",
-          },
-          cache: "no-store",
-          signal: AbortSignal.timeout(10000),
-        });
-        if (!res.ok) {
-          lastErr = new Error(`东财请求失败 ${res.status}: ${host}`);
-          continue;
-        }
-        return await res.json();
-      } catch (e) {
-        lastErr = e;
-        await sleep(150 * (attempt + 1));
-      }
+let emInflight = 0;
+let emChain: Promise<void> = Promise.resolve();
+let emLastAt = 0;
+
+function withEmQueue<T>(fn: () => Promise<T>): Promise<T> {
+  const run = async () => {
+    while (emInflight >= EM_MAX_INFLIGHT) {
+      await sleep(50);
     }
-  }
-  throw lastErr instanceof Error ? lastErr : new Error("东财请求失败");
+    const wait = Math.max(0, EM_GAP_MS - (Date.now() - emLastAt));
+    if (wait > 0) await sleep(wait);
+    emInflight += 1;
+    emLastAt = Date.now();
+    try {
+      return await fn();
+    } finally {
+      emInflight -= 1;
+    }
+  };
+  const next = emChain.then(run, run);
+  emChain = next.then(
+    () => undefined,
+    () => undefined
+  );
+  return next;
+}
+
+async function emFetch(pathAndQuery: string, hosts: string[]): Promise<unknown> {
+  return withEmQueue(async () => {
+    let lastErr: unknown;
+    for (const host of hosts) {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const res = await fetch(`${host}${pathAndQuery}`, {
+            headers: {
+              "User-Agent": UA,
+              Referer: "https://quote.eastmoney.com/",
+            },
+            cache: "no-store",
+            signal: AbortSignal.timeout(10000),
+          });
+          if (!res.ok) {
+            lastErr = new Error(`东财请求失败 ${res.status}`);
+            await sleep(EM_FAIL_WAIT_MS);
+            continue;
+          }
+          return await res.json();
+        } catch (e) {
+          lastErr = e;
+          await sleep(EM_FAIL_WAIT_MS);
+        }
+      }
+      // 主站连续失败再换下一个镜像
+    }
+    throw lastErr instanceof Error ? lastErr : new Error("东财请求失败");
+  });
 }
 
 function num(v: unknown, fallback = 0): number {
@@ -104,6 +155,8 @@ function parseClistItem(item: Record<string, unknown>): MarketSnapshot {
     market: mapDiff(f13, code),
     code,
     name: String(item.f14 ?? ""),
+    price: num(item.f2),
+    volume: num(item.f5),
     changePct: num(item.f3),
     amount: num(item.f6),
     turnover: num(item.f8),
@@ -132,7 +185,6 @@ function parseKlineRow(row: string): KlineBar {
   };
 }
 
-/** 腾讯日 K 回退（东财 his 不稳定时） */
 async function fetchDailyKlinesTencent(
   market: Market,
   code: string,
@@ -140,7 +192,10 @@ async function fetchDailyKlinesTencent(
 ): Promise<KlineBar[]> {
   const symbol = tencentSymbol(market, code);
   const url = `https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=${symbol},day,,,${lmt},qfq`;
-  const res = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(10000) });
+  const res = await fetch(url, {
+    cache: "no-store",
+    signal: AbortSignal.timeout(10000),
+  });
   if (!res.ok) throw new Error(`腾讯日K失败 ${res.status}`);
   const json = (await res.json()) as {
     data?: Record<string, { qfqday?: string[][]; day?: string[][] }>;
@@ -157,7 +212,6 @@ async function fetchDailyKlinesTencent(
   }));
 }
 
-/** 腾讯分钟 K 回退：m1 / m5 */
 async function fetchMinuteKlinesTencent(
   market: Market,
   code: string,
@@ -166,14 +220,17 @@ async function fetchMinuteKlinesTencent(
 ): Promise<KlineBar[]> {
   const symbol = tencentSymbol(market, code);
   const url = `https://ifzq.gtimg.cn/appstock/app/kline/mkline?param=${symbol},${period},,${lmt}`;
-  const res = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(10000) });
+  const res = await fetch(url, {
+    cache: "no-store",
+    signal: AbortSignal.timeout(10000),
+  });
   if (!res.ok) throw new Error(`腾讯分钟K失败 ${res.status}`);
   const json = (await res.json()) as {
     data?: Record<string, Record<string, string[][]>>;
   };
   const rows = json.data?.[symbol]?.[period] ?? [];
   return rows.map((r) => {
-    const raw = String(r[0]); // YYYYMMDDHHmm
+    const raw = String(r[0]);
     const date =
       raw.length >= 12
         ? `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)} ${raw.slice(8, 10)}:${raw.slice(10, 12)}`
@@ -191,9 +248,8 @@ async function fetchMinuteKlinesTencent(
 }
 
 const CLIST_FS = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048";
-const CLIST_FIELDS = "f12,f13,f14,f3,f6,f8,f9,f10,f20,f23,f26";
+const CLIST_FIELDS = "f2,f5,f12,f13,f14,f3,f6,f8,f9,f10,f20,f23,f26";
 
-/** 东财全市场快照的一页 */
 export async function fetchEastmoneyPage(
   page: number,
   pageSize = 100
@@ -210,7 +266,16 @@ export async function fetchEastmoneyPage(
   return { items, total };
 }
 
-/** 新浪榜单一页（沪深 A 或北证） */
+type SinaRow = {
+  symbol: string;
+  code: string;
+  name: string;
+  trade: string | number;
+  volume: number;
+  changepercent: number;
+  amount: number;
+};
+
 export async function fetchSinaPage(
   node: "hs_a" | "hs_bjs",
   page: number
@@ -239,6 +304,8 @@ export async function fetchSinaPage(
       market,
       code,
       name: row.name,
+      price: num(row.trade),
+      volume: num(row.volume),
       changePct: num(row.changepercent),
       amount: num(row.amount),
       turnover: 0,
@@ -250,116 +317,6 @@ export async function fetchSinaPage(
     });
   }
   return out;
-}
-
-/** 全市场 A 股快照（沪深京），分页拉取；东财失败时回退新浪 */
-export async function fetchAllSnapshots(
-  pageSize = 100
-): Promise<MarketSnapshot[]> {
-  try {
-    return await fetchAllSnapshotsEastmoney(pageSize);
-  } catch (e) {
-    console.warn("东财全市场快照失败，回退新浪", e);
-    return fetchAllSnapshotsSina();
-  }
-}
-
-async function fetchAllSnapshotsEastmoney(
-  pageSize = 100
-): Promise<MarketSnapshot[]> {
-  const fs = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048";
-  const fields = "f12,f13,f14,f3,f6,f8,f9,f10,f20,f23,f26";
-
-  const firstPath =
-    `/api/qt/clist/get?pn=1&pz=${pageSize}&po=1&np=1&fltt=2&invt=2&fid=f12` +
-    `&fs=${encodeURIComponent(fs)}&fields=${fields}`;
-
-  const first = (await emFetch(firstPath, PUSH2_HOSTS)) as {
-    data?: { total?: number; diff?: Record<string, unknown>[] };
-  };
-  const total = first.data?.total ?? 0;
-  const pages = Math.max(1, Math.ceil(total / pageSize));
-  const all: MarketSnapshot[] = [];
-  for (const item of first.data?.diff ?? []) all.push(parseClistItem(item));
-
-  const remaining = Array.from({ length: pages - 1 }, (_, i) => i + 2);
-  const CONCURRENCY = 10;
-  for (let i = 0; i < remaining.length; i += CONCURRENCY) {
-    const slice = remaining.slice(i, i + CONCURRENCY);
-    const results = await Promise.all(
-      slice.map(async (pn) => {
-        const path =
-          `/api/qt/clist/get?pn=${pn}&pz=${pageSize}&po=1&np=1&fltt=2&invt=2&fid=f12` +
-          `&fs=${encodeURIComponent(fs)}&fields=${fields}`;
-        const json = (await emFetch(path, PUSH2_HOSTS)) as {
-          data?: { diff?: Record<string, unknown>[] };
-        };
-        return (json.data?.diff ?? []).map(parseClistItem);
-      })
-    );
-    for (const batch of results) all.push(...batch);
-  }
-  if (all.length === 0) throw new Error("东财快照为空");
-  return all;
-}
-
-type SinaRow = {
-  symbol: string;
-  code: string;
-  name: string;
-  changepercent: number;
-  amount: number;
-};
-
-async function fetchSinaNode(node: string): Promise<SinaRow[]> {
-  const pageSize = 80;
-  const all: SinaRow[] = [];
-  for (let page = 1; page <= 80; page++) {
-    const url =
-      `https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData` +
-      `?page=${page}&num=${pageSize}&sort=amount&asc=0&node=${node}`;
-    const res = await fetch(url, {
-      cache: "no-store",
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!res.ok) break;
-    const rows = (await res.json()) as SinaRow[];
-    if (!Array.isArray(rows) || rows.length === 0) break;
-    all.push(...rows);
-    if (rows.length < pageSize) break;
-  }
-  return all;
-}
-
-async function fetchAllSnapshotsSina(): Promise<MarketSnapshot[]> {
-  const [hs, bj] = await Promise.all([
-    fetchSinaNode("hs_a"),
-    fetchSinaNode("hs_bjs"),
-  ]);
-  const map = new Map<string, MarketSnapshot>();
-  for (const row of [...hs, ...bj]) {
-    const code = String(row.code).padStart(6, "0");
-    let market: Market;
-    try {
-      market = codeToMarket(code);
-    } catch {
-      continue;
-    }
-    map.set(`${market}:${code}`, {
-      market,
-      code,
-      name: row.name,
-      changePct: num(row.changepercent),
-      amount: num(row.amount),
-      turnover: 0,
-      pe: 0,
-      volumeRatio: 0,
-      marketCap: 0,
-      pb: 0,
-      listDate: null,
-    });
-  }
-  return [...map.values()];
 }
 
 export async function fetchKlines(
@@ -380,18 +337,12 @@ export async function fetchKlines(
     const bars = (json.data?.klines ?? []).map(parseKlineRow);
     if (bars.length > 0) return bars;
   } catch {
-    // fall through to tencent
+    // fall through
   }
 
-  if (opts.klt === 101) {
-    return fetchDailyKlinesTencent(market, code, opts.lmt);
-  }
-  if (opts.klt === 5) {
-    return fetchMinuteKlinesTencent(market, code, "m5", opts.lmt);
-  }
-  if (opts.klt === 1) {
-    return fetchMinuteKlinesTencent(market, code, "m1", opts.lmt);
-  }
+  if (opts.klt === 101) return fetchDailyKlinesTencent(market, code, opts.lmt);
+  if (opts.klt === 5) return fetchMinuteKlinesTencent(market, code, "m5", opts.lmt);
+  if (opts.klt === 1) return fetchMinuteKlinesTencent(market, code, "m1", opts.lmt);
   throw new Error(`无可用 K 线源 klt=${opts.klt}`);
 }
 
@@ -410,28 +361,20 @@ export async function fetchIntraday5m(
 ): Promise<KlineBar[]> {
   const bars = await fetchKlines(market, code, { klt: 5, lmt: 100 });
   const ymd = shanghaiYmd(now);
-  return bars.filter((b) => b.date.startsWith(ymd) || b.date.startsWith(ymd.replace(/-/g, "")));
-}
-
-export async function fetchIntraday1m(
-  market: Market,
-  code: string,
-  now: Date = new Date()
-): Promise<KlineBar[]> {
-  const bars = await fetchKlines(market, code, { klt: 1, lmt: 300 });
-  const ymd = shanghaiYmd(now);
-  return bars.filter((b) => b.date.startsWith(ymd) || b.date.startsWith(ymd.replace(/-/g, "")));
+  return bars.filter(
+    (b) => b.date.startsWith(ymd) || b.date.startsWith(ymd.replace(/-/g, ""))
+  );
 }
 
 export async function fetchIndexContext(now: Date = new Date()): Promise<{
-  intraday1m: KlineBar[];
+  intraday5m: KlineBar[];
   daily5: KlineBar[];
 }> {
-  const [intraday1m, daily5] = await Promise.all([
-    fetchIntraday1m("sh", "000001", now),
+  const [intraday5m, daily5] = await Promise.all([
+    fetchIntraday5m("sh", "000001", now),
     fetchDailyKlines("sh", "000001", 5),
   ]);
-  return { intraday1m, daily5 };
+  return { intraday5m, daily5 };
 }
 
 export async function isShanghaiTradingDay(
@@ -441,16 +384,11 @@ export async function isShanghaiTradingDay(
   if (bars.length === 0) return false;
   const ymd = shanghaiYmd(now);
   const d = bars[0].date;
-  return d.startsWith(ymd) || d.replace(/-/g, "").startsWith(ymd.replace(/-/g, ""));
+  return (
+    d.startsWith(ymd) ||
+    d.replace(/-/g, "").startsWith(ymd.replace(/-/g, ""))
+  );
 }
-
-export type QuoteLite = {
-  market: Market;
-  code: string;
-  name: string;
-  changePct: number;
-  volumeRatio: number;
-};
 
 export async function fetchQuotes(
   items: { market: Market; code: string }[]
@@ -458,7 +396,7 @@ export async function fetchQuotes(
   if (items.length === 0) return [];
   const secids = items.map((i) => toSecid(i.market, i.code)).join(",");
   const path =
-    `/api/qt/ulist.np/get?fltt=2&invt=2&fields=f12,f13,f14,f3,f10&secids=${encodeURIComponent(secids)}`;
+    `/api/qt/ulist.np/get?fltt=2&invt=2&fields=f12,f13,f14,f2,f3,f5,f6,f8,f10,f17,f15,f16&secids=${encodeURIComponent(secids)}`;
   const json = (await emFetch(path, PUSH2_HOSTS)) as {
     data?: { diff?: Record<string, unknown>[] };
   };
@@ -468,8 +406,14 @@ export async function fetchQuotes(
       market: mapDiff(num(item.f13), code),
       code,
       name: String(item.f14 ?? ""),
+      price: num(item.f2),
       changePct: num(item.f3),
       volumeRatio: num(item.f10),
+      turnover: num(item.f8),
+      amount: num(item.f6),
+      open: num(item.f17),
+      high: num(item.f15),
+      low: num(item.f16),
     };
   });
 }
@@ -478,12 +422,20 @@ export async function resolveStock(code: string): Promise<{
   market: Market;
   code: string;
   name: string;
+  price: number;
 }> {
   const market = codeToMarket(code);
   try {
     const quotes = await fetchQuotes([{ market, code }]);
     const q = quotes[0];
-    if (q?.name) return { market: q.market, code: q.code, name: q.name };
+    if (q?.name) {
+      return {
+        market: q.market,
+        code: q.code,
+        name: q.name,
+        price: q.price,
+      };
+    }
   } catch {
     // fall through
   }
@@ -497,8 +449,9 @@ export async function resolveStock(code: string): Promise<{
   };
   const qt = mkJson.data?.[symbol]?.qt?.[symbol];
   const name = qt?.[1];
+  const price = num(qt?.[3]);
   if (!name) throw new Error(`找不到股票: ${code}`);
-  return { market, code, name };
+  return { market, code, name, price };
 }
 
 export async function mapPool<T, R>(

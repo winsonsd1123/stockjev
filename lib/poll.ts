@@ -1,17 +1,22 @@
-import { nextBatch } from "@/lib/batch";
 import {
+  fetchDailyKlines,
   fetchIndexContext,
   fetchIntraday5m,
   fetchQuotes,
   isShanghaiTradingDay,
-  mapPool,
   type KlineBar,
+  type QuoteLite,
 } from "@/lib/eastmoney";
 import { buildBuyQuestion, buildSellQuestion, parseNoul } from "@/lib/jev";
 import { decide } from "@/lib/jev-client";
 import type { Market } from "@/lib/market";
 import { isTradingSession } from "@/lib/session";
-import { anyRunningRun, getRunningRun, type StepResult } from "@/lib/discover";
+import {
+  anyRunningRun,
+  getRunningRun,
+  type StepEvent,
+  type StepResult,
+} from "@/lib/discover";
 import { getSupabase } from "@/lib/supabase";
 
 export type PollQueueItem = {
@@ -24,7 +29,7 @@ export type PollQueueItem = {
 export type PollProgress = {
   phase: "context" | "items" | "done";
   context: {
-    indexIntraday1m: KlineBar[];
+    indexIntraday5m: KlineBar[];
     indexDaily5: KlineBar[];
   } | null;
   queue: PollQueueItem[];
@@ -34,8 +39,7 @@ export type PollProgress = {
   failedCodes: string[];
 };
 
-const BATCH_SIZE = 10;
-const FETCH_CONCURRENCY = 10;
+const BATCH_SIZE = 5;
 
 function emptyProgress(): PollProgress {
   return {
@@ -56,10 +60,11 @@ function asProgress(raw: unknown): PollProgress {
 
 export async function startPollRun(): Promise<
   | { skipped: true; reason: string }
-  | { skipped: false; runId: string }
+  | { skipped: false; runId: number }
 > {
   const tradingDay = await isShanghaiTradingDay();
   if (!isTradingSession(tradingDay)) {
+    console.log("[poll] skip 非交易时段");
     return { skipped: true, reason: "非交易时段" };
   }
 
@@ -92,6 +97,7 @@ export async function startPollRun(): Promise<
   ];
 
   if (queue.length === 0) {
+    console.log("[poll] skip 池为空");
     return { skipped: true, reason: "观察池与持仓均为空" };
   }
 
@@ -111,10 +117,11 @@ export async function startPollRun(): Promise<
     .select("*")
     .single();
   if (error) throw error;
-  return { skipped: false, runId: data.id };
+  console.log(`[poll] start run=${data.id} total=${queue.length}`);
+  return { skipped: false, runId: data.id as number };
 }
 
-async function saveProgress(runId: string, progress: PollProgress) {
+async function saveProgress(runId: number, progress: PollProgress) {
   const sb = getSupabase();
   const { error } = await sb
     .from("runs")
@@ -123,7 +130,7 @@ async function saveProgress(runId: string, progress: PollProgress) {
   if (error) throw error;
 }
 
-async function completeRun(runId: string, progress: PollProgress) {
+async function completeRun(runId: number, progress: PollProgress) {
   const sb = getSupabase();
   const { error } = await sb
     .from("runs")
@@ -136,10 +143,43 @@ async function completeRun(runId: string, progress: PollProgress) {
   if (error) throw error;
 }
 
-export async function stepPoll(runId?: string): Promise<StepResult> {
+async function judgeOne(
+  item: PollQueueItem,
+  context: PollProgress["context"],
+  quote: QuoteLite | undefined,
+  bars5m: KlineBar[],
+  daily5: KlineBar[]
+): Promise<{ probability: number }> {
+  const state = {
+    index: context,
+    quote: quote
+      ? {
+          name: quote.name,
+          price: quote.price,
+          changePct: quote.changePct,
+          volumeRatio: quote.volumeRatio,
+          turnover: quote.turnover,
+          amount: quote.amount,
+          open: quote.open,
+          high: quote.high,
+          low: quote.low,
+        }
+      : { name: item.name },
+    stock: { market: item.market, code: item.code, name: item.name },
+    intraday5m: bars5m,
+    daily5,
+  };
+  const questions =
+    item.kind === "buy" ? buildBuyQuestion() : buildSellQuestion();
+  const key = item.kind === "buy" ? "buy" : "sell";
+  const resp = await decide(state, questions);
+  return parseNoul(resp, key);
+}
+
+export async function stepPoll(runId?: number): Promise<StepResult> {
   const sb = getSupabase();
   let run;
-  if (runId) {
+  if (runId != null) {
     const { data, error } = await sb
       .from("runs")
       .select("*")
@@ -154,90 +194,116 @@ export async function stepPoll(runId?: string): Promise<StepResult> {
     throw new Error("没有进行中的 poll 任务");
   }
 
-  let progress = asProgress(run.progress);
+  const progress = asProgress(run.progress);
+  const events: StepEvent[] = [];
 
   if (progress.phase === "context" || !progress.context) {
     const ctx = await fetchIndexContext();
     progress.context = {
-      indexIntraday1m: ctx.intraday1m,
+      indexIntraday5m: ctx.intraday5m,
       indexDaily5: ctx.daily5,
     };
     progress.phase = "items";
-    await saveProgress(run.id, progress);
+    await saveProgress(run.id as number, progress);
+    console.log("[poll] context ready");
     return {
       done: false,
       processed: progress.processed,
       total: progress.total,
-      runId: run.id,
+      runId: run.id as number,
       phase: progress.phase,
       message: "已抓取大盘背景，开始逐只判断",
       events: [{ level: "info", text: "已抓取上证分时与近 5 日走势" }],
     };
   }
 
-  const { batch, nextCursor, done } = nextBatch(
-    progress.queue,
+  const batch = progress.queue.slice(
     progress.cursor,
-    BATCH_SIZE
+    progress.cursor + BATCH_SIZE
   );
-
   const quotes = await fetchQuotes(
     batch.map((b) => ({ market: b.market, code: b.code }))
   );
   const quoteMap = new Map(quotes.map((q) => [`${q.market}:${q.code}`, q]));
 
-  await mapPool(batch, FETCH_CONCURRENCY, async (item) => {
+  for (const item of batch) {
     try {
-      const bars = await fetchIntraday5m(item.market, item.code);
-      if (bars.length === 0) {
+      const [bars5m, daily5] = await Promise.all([
+        fetchIntraday5m(item.market, item.code),
+        fetchDailyKlines(item.market, item.code, 5),
+      ]);
+      if (bars5m.length === 0) {
         progress.failedCodes.push(item.code);
-        return;
+        events.push({
+          level: "fail",
+          text: `${item.code} ${item.name} 无分时，跳过`,
+        });
+        console.log(`[poll] fail ${item.code} 无分时`);
+        continue;
       }
       const quote = quoteMap.get(`${item.market}:${item.code}`);
-      const state = {
-        index: progress.context,
-        quote: quote
-          ? {
-              name: quote.name,
-              changePct: quote.changePct,
-              volumeRatio: quote.volumeRatio,
-            }
-          : { name: item.name },
-        stock: { market: item.market, code: item.code, name: item.name },
-        intraday5m: bars,
-      };
-      const questions =
-        item.kind === "buy" ? buildBuyQuestion() : buildSellQuestion();
-      const key = item.kind === "buy" ? "buy" : "sell";
-      const resp = await decide(state, questions);
-      const parsed = parseNoul(resp, key);
-      await sb.from("judgments").insert({
-        run_id: run.id,
-        market: item.market,
-        code: item.code,
-        kind: item.kind,
-        probability: parsed.probability,
-        details: parsed.details,
+      const parsed = await judgeOne(
+        item,
+        progress.context,
+        quote,
+        bars5m,
+        daily5
+      );
+      const nowIso = new Date().toISOString();
+      if (item.kind === "buy") {
+        await sb
+          .from("watchlist")
+          .update({
+            latest_buy_probability: parsed.probability,
+            latest_buy_at: nowIso,
+          })
+          .eq("market", item.market)
+          .eq("code", item.code);
+      } else {
+        await sb
+          .from("holdings")
+          .update({
+            latest_sell_probability: parsed.probability,
+            latest_sell_at: nowIso,
+          })
+          .eq("market", item.market)
+          .eq("code", item.code);
+      }
+      const pct = `${(parsed.probability * 100).toFixed(1)}%`;
+      events.push({
+        level: "ok",
+        text: `${item.code} ${item.name}  ${item.kind === "buy" ? "买入" : "卖出"} ${pct}`,
       });
-    } catch {
+      console.log(
+        `[poll] ${item.kind} ${item.code} ${item.name} ${pct}`
+      );
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : "未知错误";
       progress.failedCodes.push(item.code);
+      events.push({
+        level: "fail",
+        text: `${item.code} ${item.name} 失败：${reason}`,
+      });
+      console.log(`[poll] fail ${item.code} ${reason}`);
     }
-  });
+  }
 
-  progress.cursor = nextCursor;
-  progress.processed = nextCursor;
-  await saveProgress(run.id, progress);
+  progress.cursor += batch.length;
+  progress.processed = progress.cursor;
+  await saveProgress(run.id as number, progress);
 
-  if (done) {
-    await completeRun(run.id, progress);
+  if (progress.cursor >= progress.queue.length) {
+    await completeRun(run.id as number, progress);
+    console.log(`[poll] done processed=${progress.processed}`);
     return {
       done: true,
       processed: progress.processed,
       total: progress.total,
-      runId: run.id,
+      runId: run.id as number,
       phase: "done",
       message: `轮询完成 ${progress.processed}/${progress.total}`,
       events: [
+        ...events,
         {
           level: "info",
           text: `轮询完成，失败 ${progress.failedCodes.length} 只`,
@@ -250,15 +316,10 @@ export async function stepPoll(runId?: string): Promise<StepResult> {
     done: false,
     processed: progress.processed,
     total: progress.total,
-    runId: run.id,
+    runId: run.id as number,
     phase: progress.phase,
     message: `轮询 ${progress.processed}/${progress.total}`,
-    events: [
-      {
-        level: "info",
-        text: `本批 ${batch.length} 只，累计 ${progress.processed}/${progress.total}`,
-      },
-    ],
+    events,
   };
 }
 

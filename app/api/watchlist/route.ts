@@ -14,28 +14,15 @@ export async function GET() {
       .order("added_at", { ascending: false });
     if (error) throw error;
 
-    const enriched = await Promise.all(
-      (rows ?? []).map(async (row) => {
-        const { data: judgments } = await sb
-          .from("judgments")
-          .select("*")
-          .eq("market", row.market)
-          .eq("code", row.code)
-          .in("kind", ["buy", "score"])
-          .order("created_at", { ascending: false })
-          .limit(5);
+    const items = (rows ?? []).map((row) => ({
+      ...row,
+      latestBuyProbability: row.latest_buy_probability,
+      latestBuyAt: row.latest_buy_at,
+      entryPrice: row.entry_price,
+      judgments: [] as unknown[],
+    }));
 
-        const latestBuy = (judgments ?? []).find((j) => j.kind === "buy");
-        return {
-          ...row,
-          latestBuyProbability: latestBuy?.probability ?? null,
-          latestBuyAt: latestBuy?.created_at ?? null,
-          judgments: judgments ?? [],
-        };
-      })
-    );
-
-    return NextResponse.json({ items: enriched });
+    return NextResponse.json({ items });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "watchlist get error";
     return NextResponse.json({ error: msg }, { status: 500 });
@@ -44,7 +31,10 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
-    const body = (await req.json()) as { code?: string };
+    const body = (await req.json()) as {
+      code?: string;
+      score?: number | null;
+    };
     const code = normalizeCode(body.code ?? "");
     const stock = await resolveStock(code);
     const sb = getSupabase();
@@ -56,7 +46,8 @@ export async function POST(req: Request) {
           code: stock.code,
           name: stock.name,
           source: "manual",
-          score: null,
+          score: body.score ?? null,
+          entry_price: stock.price > 0 ? stock.price : null,
         },
         { onConflict: "market,code" }
       )
@@ -79,7 +70,7 @@ export async function DELETE(req: Request) {
       return NextResponse.json({ error: "缺少 id" }, { status: 400 });
     }
     const sb = getSupabase();
-    const { error } = await sb.from("watchlist").delete().eq("id", id);
+    const { error } = await sb.from("watchlist").delete().eq("id", Number(id));
     if (error) throw error;
     return NextResponse.json({ ok: true });
   } catch (e) {

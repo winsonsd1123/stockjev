@@ -16,26 +16,32 @@ export function getSupabase(): SupabaseClient {
 }
 
 export type WatchlistRow = {
-  id: string;
+  id: number;
   market: string;
   code: string;
   name: string;
   source: "ai" | "manual";
   score: number | null;
+  entry_price: number | null;
+  latest_buy_probability: number | null;
+  latest_buy_at: string | null;
   added_at: string;
 };
 
 export type HoldingRow = {
-  id: string;
+  id: number;
   market: string;
   code: string;
   name: string;
   quantity: number;
+  entry_price: number | null;
+  latest_sell_probability: number | null;
+  latest_sell_at: string | null;
   added_at: string;
 };
 
 export type RunRow = {
-  id: string;
+  id: number;
   type: "discover" | "poll";
   status: "running" | "completed";
   progress: Record<string, unknown>;
@@ -44,8 +50,8 @@ export type RunRow = {
 };
 
 export type JudgmentRow = {
-  id: string;
-  run_id: string;
+  id: number;
+  run_id: number;
   market: string;
   code: string;
   kind: "score" | "buy" | "sell";

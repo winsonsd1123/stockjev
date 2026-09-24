@@ -1,45 +1,33 @@
-import { nextBatch } from "@/lib/batch";
 import {
   fetchDailyKlines,
   fetchEastmoneyPage,
   fetchSinaPage,
-  mapPool,
   type MarketSnapshot,
 } from "@/lib/eastmoney";
-import { filterCandidates } from "@/lib/filter";
-import {
-  buildExcellenceQuestion,
-  parseScore,
-} from "@/lib/jev";
+import { deriveDailyFeatures, passesLiquidity5d, shouldScore } from "@/lib/filter";
+import { buildExcellenceQuestion, parseScore } from "@/lib/jev";
 import { decide } from "@/lib/jev-client";
 import type { Market } from "@/lib/market";
 import { getSupabase } from "@/lib/supabase";
 
-export type DiscoverCandidate = {
+export type Suggestion = {
   market: Market;
   code: string;
   name: string;
-  changePct: number;
-  amount: number;
-  turnover: number;
-  pe: number;
-  volumeRatio: number;
-  marketCap: number;
-  pb: number;
+  score: number;
 };
 
 export type DiscoverProgress = {
-  phase: "snapshot" | "score" | "commit";
-  candidates: DiscoverCandidate[];
-  scores: { market: Market; code: string; name: string; score: number }[];
-  cursor: number;
-  processed: number;
-  total: number;
-  failedCodes: string[];
+  phase: "scan" | "commit";
   snapshotSource: "eastmoney" | "sina" | null;
   snapshotPage: number;
   snapshotPages: number;
   sinaNode: "hs_a" | "hs_bjs";
+  pageCursor: number;
+  scored: number;
+  skipped: number;
+  failedCodes: string[];
+  suggestions: Suggestion[];
 };
 
 export type StepEvent = {
@@ -51,29 +39,28 @@ export type StepResult = {
   done: boolean;
   processed: number;
   total: number;
-  runId: string;
+  runId: number;
   phase: string;
   message: string;
   events: StepEvent[];
+  suggestions?: Suggestion[];
 };
 
-const BATCH_SIZE = 30;
-const FETCH_CONCURRENCY = 10;
-const SNAPSHOT_PAGES_PER_STEP = 6;
+const MAX_SCORE_PER_STEP = 30;
+const MAX_SCAN_PER_STEP = 120;
 
 function emptyProgress(): DiscoverProgress {
   return {
-    phase: "snapshot",
-    candidates: [],
-    scores: [],
-    cursor: 0,
-    processed: 0,
-    total: 0,
-    failedCodes: [],
+    phase: "scan",
     snapshotSource: null,
     snapshotPage: 1,
     snapshotPages: 0,
     sinaNode: "hs_a",
+    pageCursor: 0,
+    scored: 0,
+    skipped: 0,
+    failedCodes: [],
+    suggestions: [],
   };
 }
 
@@ -109,7 +96,7 @@ export async function anyRunningRun() {
   return data;
 }
 
-export async function startDiscoverRun(): Promise<{ runId: string }> {
+export async function startDiscoverRun(): Promise<{ runId: number }> {
   const existing = await anyRunningRun();
   if (existing) {
     const err = new Error("已有任务在运行") as Error & { status: number };
@@ -127,10 +114,11 @@ export async function startDiscoverRun(): Promise<{ runId: string }> {
     .select("*")
     .single();
   if (error) throw error;
-  return { runId: data.id };
+  console.log(`[discover] start run=${data.id}`);
+  return { runId: data.id as number };
 }
 
-async function saveProgress(runId: string, progress: DiscoverProgress) {
+async function saveProgress(runId: number, progress: DiscoverProgress) {
   const sb = getSupabase();
   const { error } = await sb
     .from("runs")
@@ -139,7 +127,7 @@ async function saveProgress(runId: string, progress: DiscoverProgress) {
   if (error) throw error;
 }
 
-async function completeRun(runId: string, progress: DiscoverProgress) {
+async function completeRun(runId: number, progress: DiscoverProgress) {
   const sb = getSupabase();
   const { error } = await sb
     .from("runs")
@@ -152,56 +140,131 @@ async function completeRun(runId: string, progress: DiscoverProgress) {
   if (error) throw error;
 }
 
-function appendCandidates(
-  progress: DiscoverProgress,
-  snaps: MarketSnapshot[]
-): number {
-  const seen = new Set(progress.candidates.map((c) => `${c.market}:${c.code}`));
-  let added = 0;
-  for (const snap of filterCandidates(snaps)) {
-    const key = `${snap.market}:${snap.code}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    progress.candidates.push(toCandidate(snap));
-    added += 1;
-  }
-  return added;
-}
-
-function finishSnapshot(progress: DiscoverProgress): StepEvent[] {
-  progress.candidates.sort((a, b) => b.amount - a.amount);
-  progress.phase = "score";
-  progress.cursor = 0;
-  progress.processed = 0;
-  progress.total = progress.candidates.length;
-  progress.scores = [];
-  return [
-    {
+async function scoreOne(
+  runId: number,
+  snap: MarketSnapshot
+): Promise<StepEvent> {
+  const sb = getSupabase();
+  const gate = shouldScore(snap);
+  if (!gate.ok) {
+    console.log(`[discover] skip ${snap.code} ${snap.name} ${gate.reason}`);
+    return {
       level: "info",
-      text: `粗筛完成，候选 ${progress.total} 只，开始打分`,
-    },
-  ];
+      text: `${snap.code} ${snap.name} 跳过：${gate.reason}`,
+    };
+  }
+
+  try {
+    const klines = await fetchDailyKlines(snap.market, snap.code, 20);
+    if (klines.length === 0) {
+      console.log(`[discover] fail ${snap.code} 无日K`);
+      return { level: "fail", text: `${snap.code} ${snap.name} 无日K，跳过` };
+    }
+    const liq = passesLiquidity5d(klines);
+    if (!liq.ok) {
+      console.log(
+        `[discover] skip ${snap.code} ${snap.name} ${liq.reason} avg=${Math.round(liq.avgAmount)}`
+      );
+      return {
+        level: "info",
+        text: `${snap.code} ${snap.name} 跳过：${liq.reason}`,
+      };
+    }
+    const features = deriveDailyFeatures(klines);
+    const state = {
+      snapshot: {
+        name: snap.name,
+        market: snap.market,
+        code: snap.code,
+        marketCap: snap.marketCap,
+        pe: snap.pe,
+        pb: snap.pb,
+        turnover: snap.turnover,
+        volumeRatio: snap.volumeRatio,
+        changePct: snap.changePct,
+        amount: snap.amount,
+      },
+      dailyKlines: klines,
+      features,
+    };
+    const resp = await decide(state, buildExcellenceQuestion());
+    const parsed = parseScore(resp, "excellence");
+    await sb.from("judgments").insert({
+      run_id: runId,
+      market: snap.market,
+      code: snap.code,
+      kind: "score",
+      probability: parsed.probability,
+      details: { ...parsed.details, name: snap.name },
+    });
+    console.log(
+      `[discover] score ${snap.code} ${snap.name} ${parsed.displayScore}`
+    );
+    return {
+      level: "ok",
+      text: `${snap.code} ${snap.name}  AI分 ${parsed.displayScore}`,
+    };
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : "未知错误";
+    console.log(`[discover] fail ${snap.code} ${reason}`);
+    return {
+      level: "fail",
+      text: `${snap.code} ${snap.name} 失败：${reason}`,
+    };
+  }
 }
 
-function toCandidate(s: MarketSnapshot): DiscoverCandidate {
-  return {
-    market: s.market,
-    code: s.code,
-    name: s.name,
-    changePct: s.changePct,
-    amount: s.amount,
-    turnover: s.turnover,
-    pe: s.pe,
-    volumeRatio: s.volumeRatio,
-    marketCap: s.marketCap,
-    pb: s.pb,
-  };
+async function loadPage(
+  progress: DiscoverProgress
+): Promise<{ items: MarketSnapshot[]; done: boolean }> {
+  if (!progress.snapshotSource) {
+    try {
+      const first = await fetchEastmoneyPage(1, 100);
+      progress.snapshotSource = "eastmoney";
+      progress.snapshotPages = Math.max(1, Math.ceil(first.total / 100));
+      progress.snapshotPage = 1;
+      progress.pageCursor = 0;
+      console.log(
+        `[discover] eastmoney pages=${progress.snapshotPages} total=${first.total}`
+      );
+      return { items: first.items, done: false };
+    } catch {
+      progress.snapshotSource = "sina";
+      progress.sinaNode = "hs_a";
+      progress.snapshotPage = 1;
+      progress.pageCursor = 0;
+      console.log("[discover] eastmoney unavailable, use sina");
+      const items = await fetchSinaPage("hs_a", 1);
+      return { items, done: false };
+    }
+  }
+
+  if (progress.snapshotSource === "eastmoney") {
+    if (progress.snapshotPage > progress.snapshotPages) {
+      return { items: [], done: true };
+    }
+    const page = await fetchEastmoneyPage(progress.snapshotPage, 100);
+    return { items: page.items, done: false };
+  }
+
+  const items = await fetchSinaPage(progress.sinaNode, progress.snapshotPage);
+  if (items.length === 0) {
+    if (progress.sinaNode === "hs_a") {
+      progress.sinaNode = "hs_bjs";
+      progress.snapshotPage = 1;
+      progress.pageCursor = 0;
+      const bj = await fetchSinaPage("hs_bjs", 1);
+      return { items: bj, done: false };
+    }
+    return { items: [], done: true };
+  }
+  return { items, done: false };
 }
 
-export async function stepDiscover(runId?: string): Promise<StepResult> {
+export async function stepDiscover(runId?: number): Promise<StepResult> {
   const sb = getSupabase();
   let run;
-  if (runId) {
+  if (runId != null) {
     const { data, error } = await sb
       .from("runs")
       .select("*")
@@ -216,253 +279,122 @@ export async function stepDiscover(runId?: string): Promise<StepResult> {
     throw new Error("没有进行中的 discover 任务");
   }
 
-  let progress = asProgress(run.progress);
+  const progress = asProgress(run.progress);
+  const events: StepEvent[] = [];
+  let scoredThisStep = 0;
+  let scannedThisStep = 0;
 
-  if (progress.phase === "snapshot") {
-    const events: StepEvent[] = [];
-    let added = 0;
-    let scoring = false;
+  while (scoredThisStep < MAX_SCORE_PER_STEP && scannedThisStep < MAX_SCAN_PER_STEP) {
+    const { items, done } = await loadPage(progress);
+    if (done || items.length === 0) {
+      progress.phase = "commit";
+      break;
+    }
 
-    if (!progress.snapshotSource) {
-      try {
-        const first = await fetchEastmoneyPage(1, 100);
-        progress.snapshotSource = "eastmoney";
-        progress.snapshotPages = Math.max(1, Math.ceil(first.total / 100));
-        progress.snapshotPage = 2;
-        progress.total = progress.snapshotPages;
-        progress.processed = 1;
-        added += appendCandidates(progress, first.items);
-      } catch {
-        progress.snapshotSource = "sina";
-        progress.sinaNode = "hs_a";
-        progress.snapshotPage = 1;
-        progress.snapshotPages = 0;
+    while (
+      progress.pageCursor < items.length &&
+      scoredThisStep < MAX_SCORE_PER_STEP &&
+      scannedThisStep < MAX_SCAN_PER_STEP
+    ) {
+      const snap = items[progress.pageCursor];
+      progress.pageCursor += 1;
+      scannedThisStep += 1;
+      const gate = shouldScore(snap);
+      if (!gate.ok) {
+        progress.skipped += 1;
         events.push({
           level: "info",
-          text: "东财快照不可用，改用新浪榜单分页抓取",
+          text: `${snap.code} ${snap.name} 跳过：${gate.reason}`,
         });
+        continue;
+      }
+      const ev = await scoreOne(run.id as number, snap);
+      events.push(ev);
+      if (ev.level === "ok") {
+        progress.scored += 1;
+        scoredThisStep += 1;
+      } else if (ev.level === "fail") {
+        progress.failedCodes.push(snap.code);
+        scoredThisStep += 1;
+      } else {
+        // 近5日均额不足等：已拉日K，计入跳过与本步配额
+        progress.skipped += 1;
+        scoredThisStep += 1;
       }
     }
 
-    if (progress.snapshotSource === "eastmoney") {
-      const start = progress.snapshotPage;
-      const end = Math.min(
-        progress.snapshotPages,
-        start + SNAPSHOT_PAGES_PER_STEP - 1
-      );
-      if (start <= end) {
-        const pages = await Promise.all(
-          Array.from({ length: end - start + 1 }, (_, i) =>
-            fetchEastmoneyPage(start + i, 100)
-          )
-        );
-        for (const page of pages) added += appendCandidates(progress, page.items);
-        progress.snapshotPage = end + 1;
-        progress.processed = Math.min(end, progress.snapshotPages);
-        progress.total = progress.snapshotPages;
-      }
-      events.push({
-        level: "info",
-        text: `快照 ${progress.processed}/${progress.total} 页，本步新增候选 ${added}，累计 ${progress.candidates.length}`,
-      });
-      if (progress.snapshotPage > progress.snapshotPages) {
-        events.push(...finishSnapshot(progress));
-        scoring = true;
-      }
-    } else {
-      const node = progress.sinaNode;
-      let empty = false;
-      for (let i = 0; i < SNAPSHOT_PAGES_PER_STEP; i++) {
-        const page = progress.snapshotPage;
-        const items = await fetchSinaPage(node, page);
-        progress.snapshotPage = page + 1;
-        progress.processed += 1;
-        if (items.length === 0) {
-          empty = true;
-          break;
-        }
-        added += appendCandidates(progress, items);
-      }
-      const nodeLabel = node === "hs_a" ? "沪深" : "北证";
-      events.push({
-        level: "info",
-        text: `${nodeLabel}快照第 ${Math.max(1, progress.snapshotPage - 1)} 页，本步新增候选 ${added}，累计 ${progress.candidates.length}`,
-      });
-      if (empty) {
-        if (node === "hs_a") {
-          progress.sinaNode = "hs_bjs";
-          progress.snapshotPage = 1;
-          events.push({ level: "info", text: "沪深榜单结束，继续抓北证" });
-        } else {
-          progress.total = progress.processed;
-          events.push(...finishSnapshot(progress));
-          scoring = true;
-        }
-      }
-      if (progress.total < progress.processed) {
-        progress.total = progress.processed + (empty ? 0 : SNAPSHOT_PAGES_PER_STEP);
+    if (progress.pageCursor >= items.length) {
+      progress.snapshotPage += 1;
+      progress.pageCursor = 0;
+      if (
+        progress.snapshotSource === "eastmoney" &&
+        progress.snapshotPage > progress.snapshotPages
+      ) {
+        progress.phase = "commit";
+        break;
       }
     }
 
-    await saveProgress(run.id, progress);
-    const message = scoring
-      ? `粗筛完成，候选 ${progress.total} 只`
-      : (events[events.length - 1]?.text ?? "正在抓取全市场快照");
+    if (scoredThisStep >= MAX_SCORE_PER_STEP) break;
+  }
+
+  if (progress.phase === "commit") {
+    const { data: rows, error } = await sb
+      .from("judgments")
+      .select("market,code,probability,details")
+      .eq("run_id", run.id)
+      .eq("kind", "score")
+      .order("probability", { ascending: false })
+      .limit(10);
+    if (error) throw error;
+
+    const suggestions: Suggestion[] = (rows ?? []).map((r) => ({
+      market: r.market as Market,
+      code: r.code as string,
+      name: String((r.details as { name?: string })?.name ?? r.code),
+      score: Math.round(Number(r.probability) * 100),
+    }));
+    progress.suggestions = suggestions;
+    await completeRun(run.id as number, progress);
+    console.log(
+      `[discover] done scored=${progress.scored} suggestions=${suggestions.length}`
+    );
     return {
-      done: false,
-      processed: scoring ? 0 : progress.processed,
-      total: progress.total,
-      runId: run.id,
-      phase: progress.phase,
-      message,
-      events,
+      done: true,
+      processed: progress.scored,
+      total: progress.scored + progress.skipped,
+      runId: run.id as number,
+      phase: "commit",
+      message: `发现完成，建议纳入 ${suggestions.length} 只`,
+      events: [
+        ...events,
+        {
+          level: "info",
+          text: `发现完成，打分 ${progress.scored}，跳过 ${progress.skipped}`,
+        },
+        ...suggestions.map((s, i) => ({
+          level: "ok" as const,
+          text: `${i + 1}. ${s.code} ${s.name}  ${s.score}`,
+        })),
+      ],
+      suggestions,
     };
   }
 
-  if (progress.phase === "score") {
-    const { batch, nextCursor, done } = nextBatch(
-      progress.candidates,
-      progress.cursor,
-      BATCH_SIZE
-    );
-
-    const scored = await mapPool(batch, FETCH_CONCURRENCY, async (c) => {
-      try {
-        const klines = await fetchDailyKlines(c.market, c.code, 5);
-        if (klines.length === 0) {
-          return { ok: false as const, code: c.code, name: c.name };
-        }
-        const state = {
-          snapshot: {
-            name: c.name,
-            market: c.market,
-            code: c.code,
-            marketCap: c.marketCap,
-            pe: c.pe,
-            pb: c.pb,
-            turnover: c.turnover,
-            volumeRatio: c.volumeRatio,
-            changePct: c.changePct,
-            amount: c.amount,
-          },
-          dailyKlines: klines,
-        };
-        const resp = await decide(state, buildExcellenceQuestion());
-        const parsed = parseScore(resp, "excellence");
-        await sb.from("judgments").insert({
-          run_id: run.id,
-          market: c.market,
-          code: c.code,
-          kind: "score",
-          probability: parsed.probability,
-          details: parsed.details,
-        });
-        return {
-          ok: true as const,
-          row: {
-            market: c.market,
-            code: c.code,
-            name: c.name,
-            score: parsed.displayScore,
-          },
-        };
-      } catch {
-        return { ok: false as const, code: c.code, name: c.name };
-      }
-    });
-
-    const events: StepEvent[] = [];
-    for (const r of scored) {
-      if (r.ok) {
-        progress.scores.push(r.row);
-        events.push({
-          level: "ok",
-          text: `${r.row.code} ${r.row.name}  AI分 ${r.row.score}`,
-        });
-      } else {
-        progress.failedCodes.push(r.code);
-        events.push({
-          level: "fail",
-          text: `${r.code} ${r.name}  本批跳过`,
-        });
-      }
-    }
-    progress.cursor = nextCursor;
-    progress.processed = nextCursor;
-
-    if (done) {
-      progress.phase = "commit";
-    }
-    await saveProgress(run.id, progress);
-
-    const okCount = events.filter((e) => e.level === "ok").length;
-    const failCount = events.filter((e) => e.level === "fail").length;
-    const message = `打分 ${progress.processed}/${progress.total} · 本批成功 ${okCount}，跳过 ${failCount} · 累计失败 ${progress.failedCodes.length}`;
-
-    if (!done) {
-      return {
-        done: false,
-        processed: progress.processed,
-        total: progress.total,
-        runId: run.id,
-        phase: progress.phase,
-        message,
-        events,
-      };
-    }
-  }
-
-  // commit: Top 10 替换 ai 池
-  const { data: manuals, error: mErr } = await sb
-    .from("watchlist")
-    .select("market,code")
-    .eq("source", "manual");
-  if (mErr) throw mErr;
-  const manualKeys = new Set(
-    (manuals ?? []).map((m) => `${m.market}:${m.code}`)
-  );
-
-  const ranked = [...progress.scores]
-    .sort((a, b) => b.score - a.score)
-    .filter((s) => !manualKeys.has(`${s.market}:${s.code}`))
-    .slice(0, 10);
-
-  const { error: delErr } = await sb
-    .from("watchlist")
-    .delete()
-    .eq("source", "ai");
-  if (delErr) throw delErr;
-
-  if (ranked.length > 0) {
-    const { error: insErr } = await sb.from("watchlist").insert(
-      ranked.map((r) => ({
-        market: r.market,
-        code: r.code,
-        name: r.name,
-        source: "ai",
-        score: r.score,
-      }))
-    );
-    if (insErr) throw insErr;
-  }
-
-  progress.phase = "commit";
-  progress.processed = progress.total;
-  await completeRun(run.id, progress);
-
-  const topLines = ranked.map(
-    (r, i) => `${i + 1}. ${r.code} ${r.name}  ${r.score}`
-  );
+  await saveProgress(run.id as number, progress);
+  const totalHint =
+    progress.snapshotSource === "eastmoney" && progress.snapshotPages > 0
+      ? progress.snapshotPages * 100
+      : progress.scored + progress.skipped + MAX_SCORE_PER_STEP;
+  const message = `打分 ${progress.scored} · 跳过 ${progress.skipped} · 页 ${progress.snapshotPage}`;
+  console.log(`[discover] step ${message}`);
   return {
-    done: true,
-    processed: progress.processed,
-    total: progress.total,
-    runId: run.id,
-    phase: "commit",
-    message: `发现完成，写入观察池 ${ranked.length} 只`,
-    events: [
-      { level: "info", text: `发现完成，AI 观察池 ${ranked.length} 只（手动股票保留）` },
-      ...topLines.map((text) => ({ level: "ok" as const, text })),
-    ],
+    done: false,
+    processed: progress.scored,
+    total: totalHint,
+    runId: run.id as number,
+    phase: "scan",
+    message,
+    events,
   };
 }

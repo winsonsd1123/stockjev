@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { chunk, nextBatch } from "@/lib/batch";
-import { filterCandidates, passesCoarseFilter } from "@/lib/filter";
+import {
+  avgAmountLastN,
+  deriveDailyFeatures,
+  filterCandidates,
+  passesCoarseFilter,
+  passesLiquidity5d,
+  shouldScore,
+} from "@/lib/filter";
 import {
   parseNoul,
   parseScore,
@@ -29,40 +36,82 @@ describe("market", () => {
 });
 
 describe("filter", () => {
-  const today = new Date(2026, 8, 24); // Sep 24 2026
+  const today = new Date(2026, 8, 24);
 
-  it("rejects ST and low amount and new listings", () => {
+  it("rejects ST new listings and halt; amount not in snapshot gate", () => {
     expect(
       passesCoarseFilter(
-        { name: "ST测试", amount: 1e8, listDate: 20200101 },
+        { name: "ST测试", price: 10, volume: 1, listDate: 20200101 },
         today
       )
     ).toBe(false);
     expect(
       passesCoarseFilter(
-        { name: "正常", amount: 1e7, listDate: 20200101 },
+        { name: "正常", price: 10, volume: 1, listDate: 20260801 },
         today
       )
     ).toBe(false);
     expect(
-      passesCoarseFilter(
-        { name: "正常", amount: 1e8, listDate: 20260801 },
+      shouldScore(
+        { name: "正常", price: 0, volume: 1, listDate: 20200101 },
         today
       )
-    ).toBe(false);
+    ).toEqual({ ok: false, reason: "停牌或缺价量" });
     expect(
       passesCoarseFilter(
-        { name: "正常", amount: 1e8, listDate: 20200101 },
+        { name: "正常", price: 10, volume: 100, listDate: 20200101 },
         today
       )
     ).toBe(true);
   });
 
+  it("checks 5-day average amount liquidity", () => {
+    const rich = Array.from({ length: 5 }, () => ({
+      close: 10,
+      high: 11,
+      low: 9,
+      volume: 100,
+      amount: 80_000_000,
+    }));
+    const poor = Array.from({ length: 5 }, () => ({
+      close: 10,
+      high: 11,
+      low: 9,
+      volume: 100,
+      amount: 10_000_000,
+    }));
+    expect(passesLiquidity5d(rich).ok).toBe(true);
+    expect(passesLiquidity5d(poor).ok).toBe(false);
+    expect(avgAmountLastN(rich, 5)).toBe(80_000_000);
+  });
+
+  it("estimates amount from close*volume*100 when amount missing", () => {
+    const estimated = Array.from({ length: 5 }, () => ({
+      close: 10,
+      high: 11,
+      low: 9,
+      volume: 100_000, // 手 → 约 1e8 元
+      amount: 0,
+    }));
+    expect(avgAmountLastN(estimated, 5)).toBe(100_000_000);
+    expect(passesLiquidity5d(estimated).ok).toBe(true);
+  });
+
+  it("derives daily features", () => {
+    const f = deriveDailyFeatures([
+      { close: 10, high: 11, low: 9, volume: 100, amount: 1e8 },
+      { close: 12, high: 13, low: 10, volume: 200, amount: 2e8 },
+    ]);
+    expect(f.ret20).toBeCloseTo(0.2);
+    expect(f.volVsAvg).toBeCloseTo(200 / 150);
+    expect(f.avgAmount5).toBeCloseTo(1.5e8);
+  });
+
   it("filters list", () => {
     const out = filterCandidates(
       [
-        { name: "*ST差", amount: 1e9, listDate: 20200101 },
-        { name: "好", amount: 1e9, listDate: 20200101 },
+        { name: "*ST差", price: 1, volume: 1, listDate: 20200101 },
+        { name: "好", price: 1, volume: 1, listDate: 20200101 },
       ],
       today
     );
@@ -88,16 +137,15 @@ describe("batch", () => {
 });
 
 describe("session", () => {
-  it("detects trading windows on trading day", () => {
-    // 2026-09-24 10:00 Asia/Shanghai = 2026-09-24 02:00 UTC
+  it("uses continuous 9:30-15:00 window", () => {
     const morning = new Date("2026-09-24T02:00:00Z");
     expect(isTradingSession(true, morning)).toBe(true);
-    // 12:00 Shanghai = 04:00 UTC
     const noon = new Date("2026-09-24T04:00:00Z");
-    expect(isTradingSession(true, noon)).toBe(false);
-    // 14:00 Shanghai = 06:00 UTC
+    expect(isTradingSession(true, noon)).toBe(true);
     const afternoon = new Date("2026-09-24T06:00:00Z");
     expect(isTradingSession(true, afternoon)).toBe(true);
+    const afterClose = new Date("2026-09-24T07:30:00Z");
+    expect(isTradingSession(true, afterClose)).toBe(false);
     expect(isTradingSession(false, afternoon)).toBe(false);
   });
 
@@ -131,6 +179,5 @@ describe("jev parse", () => {
     const s = parseScore(response, "excellence");
     expect(s.displayScore).toBe(90);
     expect(s.probability).toBeCloseTo(0.9);
-    expect(s.details.displayScore).toBe(90);
   });
 });

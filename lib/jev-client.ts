@@ -42,8 +42,7 @@ async function callOnce(
   });
 
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Jev 调用失败 ${res.status}: ${text.slice(0, 300)}`);
+    throw new Error(`Jev 调用失败 ${res.status}`);
   }
   return (await res.json()) as DecisionsResponse;
 }
@@ -55,7 +54,7 @@ export async function decide(
 ): Promise<DecisionsResponse> {
   try {
     return await callOnce(state, questions);
-  } catch (err) {
+  } catch {
     return await callOnce(state, questions);
   }
 }

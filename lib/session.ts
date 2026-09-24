@@ -1,7 +1,6 @@
 /**
- * 交易时段判定（纯函数版）。
- * isTradingDay：上证当日 K 线是否有数据（由调用方注入，避免纯函数依赖网络）。
- * now：Asia/Shanghai 本地墙钟时间。
+ * 交易时段：交易日 Asia/Shanghai 9:30–15:00（含午休）。
+ * isTradingDay 由调用方注入（上证当日是否有 K 线）。
  */
 export function isTradingSession(
   isTradingDay: boolean,
@@ -20,9 +19,7 @@ export function isTradingSession(
   const minute = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
   const mins = hour * 60 + minute;
 
-  const morning = mins >= 9 * 60 + 30 && mins < 11 * 60 + 30;
-  const afternoon = mins >= 13 * 60 && mins < 15 * 60;
-  return morning || afternoon;
+  return mins >= 9 * 60 + 30 && mins < 15 * 60;
 }
 
 export function shanghaiYmd(now: Date = new Date()): string {

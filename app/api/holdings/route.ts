@@ -14,28 +14,15 @@ export async function GET() {
       .order("added_at", { ascending: false });
     if (error) throw error;
 
-    const enriched = await Promise.all(
-      (rows ?? []).map(async (row) => {
-        const { data: judgments } = await sb
-          .from("judgments")
-          .select("*")
-          .eq("market", row.market)
-          .eq("code", row.code)
-          .eq("kind", "sell")
-          .order("created_at", { ascending: false })
-          .limit(5);
+    const items = (rows ?? []).map((row) => ({
+      ...row,
+      latestSellProbability: row.latest_sell_probability,
+      latestSellAt: row.latest_sell_at,
+      entryPrice: row.entry_price,
+      judgments: [] as unknown[],
+    }));
 
-        const latest = (judgments ?? [])[0];
-        return {
-          ...row,
-          latestSellProbability: latest?.probability ?? null,
-          latestSellAt: latest?.created_at ?? null,
-          judgments: judgments ?? [],
-        };
-      })
-    );
-
-    return NextResponse.json({ items: enriched });
+    return NextResponse.json({ items });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "holdings get error";
     return NextResponse.json({ error: msg }, { status: 500 });
@@ -60,6 +47,7 @@ export async function POST(req: Request) {
           code: stock.code,
           name: stock.name,
           quantity,
+          entry_price: stock.price > 0 ? stock.price : null,
         },
         { onConflict: "market,code" }
       )
@@ -82,7 +70,7 @@ export async function DELETE(req: Request) {
       return NextResponse.json({ error: "缺少 id" }, { status: 400 });
     }
     const sb = getSupabase();
-    const { error } = await sb.from("holdings").delete().eq("id", id);
+    const { error } = await sb.from("holdings").delete().eq("id", Number(id));
     if (error) throw error;
     return NextResponse.json({ ok: true });
   } catch (e) {
