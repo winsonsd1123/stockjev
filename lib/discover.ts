@@ -49,6 +49,21 @@ export type StepResult = {
 const MAX_SCORE_PER_STEP = 30;
 const MAX_SCAN_PER_STEP = 120;
 
+export function discoverBarCounts(progress: {
+  scored?: number;
+  skipped?: number;
+  snapshotSource?: string | null;
+  snapshotPages?: number;
+}): { processed: number; total: number } {
+  const processed = (progress.scored ?? 0) + (progress.skipped ?? 0);
+  const pages = progress.snapshotPages ?? 0;
+  const total =
+    progress.snapshotSource === "eastmoney" && pages > 0
+      ? pages * 100
+      : processed + MAX_SCORE_PER_STEP;
+  return { processed, total: Math.max(total, processed) };
+}
+
 function emptyProgress(): DiscoverProgress {
   return {
     phase: "scan",
@@ -359,10 +374,11 @@ export async function stepDiscover(runId?: number): Promise<StepResult> {
     console.log(
       `[discover] done scored=${progress.scored} suggestions=${suggestions.length}`
     );
+    const scanned = progress.scored + progress.skipped;
     return {
       done: true,
-      processed: progress.scored,
-      total: progress.scored + progress.skipped,
+      processed: scanned,
+      total: scanned,
       runId: run.id as number,
       phase: "commit",
       message: `发现完成，建议纳入 ${suggestions.length} 只`,
@@ -382,16 +398,13 @@ export async function stepDiscover(runId?: number): Promise<StepResult> {
   }
 
   await saveProgress(run.id as number, progress);
-  const totalHint =
-    progress.snapshotSource === "eastmoney" && progress.snapshotPages > 0
-      ? progress.snapshotPages * 100
-      : progress.scored + progress.skipped + MAX_SCORE_PER_STEP;
+  const bar = discoverBarCounts(progress);
   const message = `打分 ${progress.scored} · 跳过 ${progress.skipped} · 页 ${progress.snapshotPage}`;
   console.log(`[discover] step ${message}`);
   return {
     done: false,
-    processed: progress.scored,
-    total: totalHint,
+    processed: bar.processed,
+    total: bar.total,
     runId: run.id as number,
     phase: "scan",
     message,

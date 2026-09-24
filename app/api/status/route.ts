@@ -1,11 +1,27 @@
 import { NextResponse } from "next/server";
-import { anyRunningRun } from "@/lib/discover";
+import { anyRunningRun, discoverBarCounts } from "@/lib/discover";
 import { isShanghaiTradingDay } from "@/lib/eastmoney";
 import { lastCompletedPollAt } from "@/lib/poll";
 import { isTradingSession } from "@/lib/session";
 import { getSupabase } from "@/lib/supabase";
 
 export const runtime = "nodejs";
+
+function runningProgress(type: string, progress: unknown) {
+  const slim = slimProgress(progress);
+  if (type !== "discover" || !progress || typeof progress !== "object") {
+    return slim;
+  }
+  const bar = discoverBarCounts(
+    progress as {
+      scored?: number;
+      skipped?: number;
+      snapshotSource?: string | null;
+      snapshotPages?: number;
+    }
+  );
+  return { ...slim, processed: bar.processed, total: bar.total };
+}
 
 function slimProgress(progress: unknown) {
   if (!progress || typeof progress !== "object") return {};
@@ -58,7 +74,7 @@ export async function GET() {
         ? {
             id: running.id,
             type: running.type,
-            progress: slimProgress(running.progress),
+            progress: runningProgress(running.type, running.progress),
           }
         : null,
       lastPollAt,

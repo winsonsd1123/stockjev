@@ -180,6 +180,7 @@ export default function HomePage() {
   const pollLogUserClosed = useRef(false);
 
   const driving = useRef(false);
+  const discoverLock = useRef(false);
   const bootstrapped = useRef(false);
   const listsReady = useRef(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -477,26 +478,55 @@ export default function HomePage() {
 
   async function startDiscover() {
     setConfirmDiscover(false);
-    if (busy) return;
-    setSuggestions([]);
-    setAddedSuggestionKeys(new Set());
-    setDiscoverLog([]);
-    setDiscoverProgress({
-      processed: 0,
-      total: 0,
-      label: "发现扫描",
-      phase: "scan",
-    });
+    if (busy || discoverLock.current || driving.current) return;
+    discoverLock.current = true;
+    setBusy(true);
+    setBusyType("discover");
     setTaskMessage("开始发现…");
-    const res = await fetch("/api/discover", { method: "POST" });
-    const json = await res.json();
-    if (!res.ok) {
-      const msg = json.error ?? "发现启动失败";
+    try {
+      const res = await fetch("/api/discover", { method: "POST" });
+      const json = await res.json();
+      if (res.status === 409) {
+        const s = await fetchStatus();
+        if (s.running?.type === "discover") {
+          const phase = s.running.progress?.phase ?? "scan";
+          setDiscoverProgress({
+            processed: s.running.progress?.processed ?? 0,
+            total: s.running.progress?.total ?? 0,
+            phase,
+            label: PHASE_LABEL[phase] ?? "发现扫描",
+          });
+          await driveSteps("discover", s.running.id);
+          return;
+        }
+      }
+      if (!res.ok) {
+        const msg = json.error ?? "发现启动失败";
+        setTaskMessage(msg);
+        showToast("fail", msg);
+        setBusy(false);
+        setBusyType(null);
+        return;
+      }
+      setSuggestions([]);
+      setAddedSuggestionKeys(new Set());
+      setDiscoverLog([]);
+      setDiscoverProgress({
+        processed: 0,
+        total: 0,
+        label: "发现扫描",
+        phase: "scan",
+      });
+      await driveSteps("discover", json.runId);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "发现启动失败";
       setTaskMessage(msg);
       showToast("fail", msg);
-      return;
+      setBusy(false);
+      setBusyType(null);
+    } finally {
+      discoverLock.current = false;
     }
-    await driveSteps("discover", json.runId);
   }
 
   async function onAddWatch(codeRaw?: string, score?: number) {
@@ -1132,6 +1162,7 @@ export default function HomePage() {
                   type="button"
                   className="rounded-md bg-zinc-900 px-3 py-1 text-white dark:bg-zinc-100 dark:text-zinc-900"
                   onClick={() => void startDiscover()}
+                  disabled={busy}
                 >
                   确认开始
                 </button>
