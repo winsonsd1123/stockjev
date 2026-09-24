@@ -48,8 +48,10 @@ export async function GET() {
       .maybeSingle();
 
     const suggestions =
-      (lastDiscover?.progress as { suggestions?: unknown[] } | null)
-        ?.suggestions ?? [];
+      running?.type === "discover"
+        ? []
+        : ((lastDiscover?.progress as { suggestions?: unknown[] } | null)
+            ?.suggestions ?? []);
 
     return NextResponse.json({
       running: running

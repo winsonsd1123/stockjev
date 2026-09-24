@@ -478,6 +478,8 @@ export default function HomePage() {
   async function startDiscover() {
     setConfirmDiscover(false);
     if (busy) return;
+    setSuggestions([]);
+    setAddedSuggestionKeys(new Set());
     setDiscoverLog([]);
     setDiscoverProgress({
       processed: 0,
