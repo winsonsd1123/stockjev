@@ -23,6 +23,7 @@ export async function GET() {
       latestBuyTag: row.latest_buy_tag,
       starred: Boolean(row.starred),
       bearStreak: Number(row.bear_streak ?? 0),
+      confidence: Number(row.confidence ?? 0),
       trendTag: row.trend_tag ?? null,
       judgments: [] as unknown[],
     }));

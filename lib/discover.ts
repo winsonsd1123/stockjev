@@ -12,7 +12,7 @@ import {
   shouldScore,
 } from "@/lib/filter";
 import { buildExcellenceQuestion, parseNouls, parseScore } from "@/lib/jev";
-import { decide } from "@/lib/jev-client";
+import { decide, jevRequest } from "@/lib/jev-client";
 import { limitPct, type Market } from "@/lib/market";
 import { discoverCap, reconcilePool, type PoolAlign } from "@/lib/rules";
 import { getSupabase } from "@/lib/supabase";
@@ -224,7 +224,9 @@ async function scoreOne(
       },
       features,
     };
-    const resp = await decide(state, buildExcellenceQuestion());
+    const questions = buildExcellenceQuestion();
+    const prompt = jevRequest(state, questions);
+    const resp = await decide(state, questions);
     const parsed = parseScore(resp, "excellence");
     const parts = parseNouls(resp, ["overextended", "trendHealthy"]);
     const cap = discoverCap(rawFeatures);
@@ -240,6 +242,7 @@ async function scoreOne(
       code: snap.code,
       kind: "score",
       probability: rank,
+      prompt,
       details: {
         ...parsed.details,
         name: snap.name,
@@ -304,6 +307,7 @@ async function syncWatchPool(
     code: string;
     probability: number;
     details: unknown;
+    prompt: unknown;
   }[]
 ): Promise<{ suggestions: Suggestion[]; removed: number; inserted: number }> {
   const sb = getSupabase();
@@ -337,7 +341,7 @@ async function syncWatchPool(
 
   const { data: poolRows, error: poolError } = await sb
     .from("watchlist")
-    .select("id,market,code,starred,bear_streak,score");
+    .select("id,market,code,starred,bear_streak,score,confidence");
   if (poolError) throw poolError;
 
   const trends: { id: number; maAlign: PoolAlign }[] = [];
@@ -374,6 +378,11 @@ async function syncWatchPool(
     .filter((s) => s.market && s.code)
     .map((s) => `${s.market}:${s.code}`);
 
+  const promptByKey = new Map(
+    rows.map((r) => [`${r.market}:${r.code}`, r.prompt ?? null])
+  );
+  const poolById = new Map((poolRows ?? []).map((row) => [row.id as number, row]));
+
   const plan = reconcilePool({
     pool: (poolRows ?? []).map((row) => ({
       id: row.id as number,
@@ -400,9 +409,17 @@ async function syncWatchPool(
     if (error) throw error;
   }
   for (const update of plan.scoreUpdates) {
+    const pool = poolById.get(update.id);
+    const prompt = pool
+      ? (promptByKey.get(`${pool.market}:${pool.code}`) ?? null)
+      : null;
     const { error } = await sb
       .from("watchlist")
-      .update({ score: update.score })
+      .update({
+        score: update.score,
+        prompt,
+        confidence: Number(pool?.confidence ?? 0) + 1,
+      })
       .eq("id", update.id);
     if (error) throw error;
   }
@@ -416,6 +433,8 @@ async function syncWatchPool(
       starred: false,
       score: row.score,
       entry_price: stock.price > 0 ? stock.price : null,
+      prompt: promptByKey.get(`${row.market}:${row.code}`) ?? null,
+      confidence: 1,
     });
     if (error) throw error;
   }
@@ -524,7 +543,7 @@ export async function stepDiscover(runId?: number): Promise<StepResult> {
   if (progress.phase === "commit") {
     const { data: rows, error } = await sb
       .from("judgments")
-      .select("market,code,probability,details")
+      .select("market,code,probability,details,prompt")
       .eq("run_id", run.id)
       .eq("kind", "score")
       .order("probability", { ascending: false })
@@ -538,6 +557,7 @@ export async function stepDiscover(runId?: number): Promise<StepResult> {
         code: r.code as string,
         probability: Number(r.probability),
         details: r.details,
+        prompt: r.prompt,
       }))
     );
     const suggestions = synced.suggestions;

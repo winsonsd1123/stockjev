@@ -16,6 +16,7 @@ type WatchItem = {
   latestBuyTag: string | null;
   starred?: boolean;
   trendTag?: string | null;
+  confidence?: number;
 };
 
 type HoldingItem = {
@@ -889,6 +890,7 @@ export default function HomePage() {
                     <th className="py-2 pr-2">入池价</th>
                     <th className="py-2 pr-2">现价</th>
                     <th className="py-2 pr-2">AI分</th>
+                    <th className="py-2 pr-2">信心</th>
                     <th className="py-2 pr-2">买入概率</th>
                     <th className="py-2 pr-2">标记</th>
                     <th className="py-2 pr-2">更新时间</th>
@@ -896,7 +898,7 @@ export default function HomePage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {listsStatus === "loading" && <SkeletonRows cols={10} />}
+                  {listsStatus === "loading" && <SkeletonRows cols={11} />}
                   {listsStatus === "ready" &&
                     watchlist.map((row) => (
                       <tr
@@ -931,6 +933,7 @@ export default function HomePage() {
                         <td className="py-2 pr-2">{money(row.entryPrice)}</td>
                         <td className="py-2 pr-2">{money(row.lastPrice)}</td>
                         <td className="py-2 pr-2">{row.score ?? "—"}</td>
+                        <td className="py-2 pr-2">{row.confidence ?? 0}</td>
                         <td className="py-2 pr-2">
                           {pct(row.latestBuyProbability)}
                         </td>
@@ -980,7 +983,7 @@ export default function HomePage() {
                   {listsStatus === "ready" && watchlist.length === 0 && (
                     <tr>
                       <td
-                        colSpan={10}
+                        colSpan={11}
                         className="py-6 text-center text-zinc-400"
                       >
                         暂无观察池股票

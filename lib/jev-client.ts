@@ -19,6 +19,17 @@ export type JevQuestionMap = Record<
     }
 >;
 
+/** 与 decide() POST body 相同，供 judgments / watchlist / holdings 落库 */
+export type JevPrompt = {
+  model: string;
+  state: unknown;
+  questions: JevQuestionMap;
+};
+
+export function jevRequest(state: unknown, questions: JevQuestionMap): JevPrompt {
+  return { model: JEV_MODEL, state, questions };
+}
+
 async function callOnce(
   state: unknown,
   questions: JevQuestionMap
@@ -34,11 +45,7 @@ async function callOnce(
       "HTTP-Referer": "https://github.com/local/stock",
       "X-Title": "A-share Jev Observer",
     },
-    body: JSON.stringify({
-      model: JEV_MODEL,
-      state,
-      questions,
-    }),
+    body: JSON.stringify(jevRequest(state, questions)),
   });
 
   if (!res.ok) {

@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import type { JevPrompt } from "@/lib/jev-client";
 
 let client: SupabaseClient | null = null;
 
@@ -30,6 +31,7 @@ export type WatchlistRow = {
   latest_buy_probability: number | null;
   latest_buy_at: string | null;
   latest_buy_tag: string | null;
+  prompt: JevPrompt | null;
   added_at: string;
 };
 
@@ -44,6 +46,7 @@ export type HoldingRow = {
   latest_sell_probability: number | null;
   latest_sell_at: string | null;
   latest_sell_tag: string | null;
+  prompt: JevPrompt | null;
   added_at: string;
 };
 
@@ -64,5 +67,6 @@ export type JudgmentRow = {
   kind: "score" | "buy" | "sell";
   probability: number;
   details: Record<string, unknown>;
+  prompt: JevPrompt | null;
   created_at: string;
 };

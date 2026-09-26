@@ -17,7 +17,7 @@ import {
   composeSell,
   parseNouls,
 } from "@/lib/jev";
-import { decide } from "@/lib/jev-client";
+import { decide, jevRequest, type JevPrompt } from "@/lib/jev-client";
 import { limitPct, type Market } from "@/lib/market";
 import { applyCap, buyGate, sellGate } from "@/lib/rules";
 import { isLateSession, isTradingSession, sessionProgress } from "@/lib/session";
@@ -242,7 +242,12 @@ async function judgeBuy(input: {
   indexRet5: number | null;
   price: number;
   vwap: number | null;
-}): Promise<{ probability: number; tag: string | null; parts: Record<string, number> }> {
+}): Promise<{
+  probability: number;
+  tag: string | null;
+  parts: Record<string, number>;
+  prompt: JevPrompt | null;
+}> {
   const gate = buyGate({
     isLimitUp: input.intra.isLimitUp,
     isOneWordBoard: input.intra.isOneWordBoard,
@@ -265,6 +270,7 @@ async function judgeBuy(input: {
       probability: gate.probability ?? 0,
       tag: gate.tag ?? null,
       parts: {},
+      prompt: null,
     };
   }
   const features = roundFeatureMap({
@@ -280,7 +286,9 @@ async function judgeBuy(input: {
         ? Math.round((input.daily.ret5 - input.indexRet5) * 10000) / 10000
         : null,
   });
-  const resp = await decide({ features }, buildBuyQuestions());
+  const questions = buildBuyQuestions();
+  const prompt = jevRequest({ features }, questions);
+  const resp = await decide({ features }, questions);
   const raw = parseNouls(resp, [
     "chaseRisk",
     "strongerThanIndex",
@@ -299,7 +307,7 @@ async function judgeBuy(input: {
     ),
     gate.cap
   );
-  return { probability, tag: gate.tag ?? null, parts: raw };
+  return { probability, tag: gate.tag ?? null, parts: raw, prompt };
 }
 
 async function judgeSell(input: {
@@ -309,7 +317,12 @@ async function judgeSell(input: {
   position: PositionFeatures;
   price: number;
   vwap: number | null;
-}): Promise<{ probability: number; tag: string | null; parts: Record<string, number> }> {
+}): Promise<{
+  probability: number;
+  tag: string | null;
+  parts: Record<string, number>;
+  prompt: JevPrompt | null;
+}> {
   const gate = sellGate({
     isLimitUp: input.intra.isLimitUp,
     isLimitDown: input.intra.isLimitDown,
@@ -329,6 +342,7 @@ async function judgeSell(input: {
       probability: gate.probability ?? 0,
       tag: gate.tag ?? null,
       parts: {},
+      prompt: null,
     };
   }
   const features = roundFeatureMap({
@@ -339,7 +353,9 @@ async function judgeSell(input: {
     vwap: input.vwap,
     quantity: input.item.quantity,
   });
-  const resp = await decide({ features }, buildSellQuestions());
+  const questions = buildSellQuestions();
+  const prompt = jevRequest({ features }, questions);
+  const resp = await decide({ features }, questions);
   const raw = parseNouls(resp, ["trendBroken", "takeProfit", "dipIsMarketDriven"]);
   let cap = gate.cap;
   if (input.intra.isLimitUp && raw.takeProfit >= 0.5) cap = undefined;
@@ -351,7 +367,7 @@ async function judgeSell(input: {
     }),
     cap
   );
-  return { probability, tag: gate.tag ?? null, parts: raw };
+  return { probability, tag: gate.tag ?? null, parts: raw, prompt };
 }
 
 export async function stepPoll(runId?: number): Promise<StepResult> {
@@ -497,6 +513,7 @@ export async function stepPoll(runId?: number): Promise<StepResult> {
             latest_buy_probability: judged.probability,
             latest_buy_at: nowIso,
             latest_buy_tag: judged.tag,
+            prompt: judged.prompt,
             ...pricePatch,
           })
           .eq("market", item.market)
@@ -508,6 +525,7 @@ export async function stepPoll(runId?: number): Promise<StepResult> {
             latest_sell_probability: judged.probability,
             latest_sell_at: nowIso,
             latest_sell_tag: judged.tag,
+            prompt: judged.prompt,
             ...pricePatch,
           })
           .eq("market", item.market)
@@ -519,6 +537,7 @@ export async function stepPoll(runId?: number): Promise<StepResult> {
         code: item.code,
         kind: item.kind,
         probability: judged.probability,
+        prompt: judged.prompt,
         details: {
           name: item.name,
           tag: judged.tag,
