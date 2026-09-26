@@ -280,16 +280,30 @@ function toQuote(snap: MarketSnapshot, q: Realtime): QuoteLite {
   };
 }
 
+async function snapshotSlice(
+  offset: number,
+  limit: number
+): Promise<{ items: MarketSnapshot[]; total: number }> {
+  const list = await stockList();
+  const start = Math.max(0, offset);
+  const size = Math.max(0, limit);
+  const slice = list.slice(start, start + size);
+  const items: MarketSnapshot[] = [];
+  for (const item of slice) {
+    items.push(await quoteOf(item));
+  }
+  return { items, total: list.length };
+}
+
 export const biyingMarketData: MarketData = {
+  async fetchSnapshotSlice(offset, limit) {
+    return snapshotSlice(offset, limit);
+  },
+
   async fetchSnapshotPage(page, pageSize = 100) {
-    const list = await stockList();
-    const start = (page - 1) * pageSize;
-    const slice = list.slice(start, start + pageSize);
-    const items: MarketSnapshot[] = [];
-    for (const item of slice) {
-      items.push(await quoteOf(item));
-    }
-    return { items, total: list.length };
+    const size = pageSize > 0 ? pageSize : 100;
+    const start = (Math.max(page, 1) - 1) * size;
+    return snapshotSlice(start, size);
   },
 
   async fetchDailyKlines(market, code, lmt = 5) {

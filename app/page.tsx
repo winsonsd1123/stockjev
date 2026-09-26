@@ -79,7 +79,7 @@ const POLL_INTERVAL_MS = 15 * 60 * 1000;
 const HIGHLIGHT_MS = 1600;
 
 const PHASE_LABEL: Record<string, string> = {
-  scan: "发现扫描",
+  scan: "抓取快照",
   snapshot: "抓取快照",
   score: "优秀度打分",
   commit: "生成建议",
@@ -321,13 +321,46 @@ export default function HomePage() {
           setTaskMessage(
             type === "discover" ? "正在推进发现…" : "正在推进盘中判定…"
           );
-          const res = await fetch(`/api/${type}/step`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ runId: currentRunId }),
-          });
-          const json = await res.json();
-          if (!res.ok) throw new Error(json.error ?? "step 失败");
+          let json: {
+            error?: string;
+            runId?: number;
+            phase?: string;
+            processed?: number;
+            total?: number;
+            message?: string;
+            events?: StepEvent[];
+            suggestions?: Suggestion[];
+            done?: boolean;
+          } | null = null;
+          let status = 0;
+          for (let attempt = 0; attempt < 2; attempt++) {
+            const res = await fetch(`/api/${type}/step`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ runId: currentRunId }),
+            });
+            status = res.status;
+            const text = await res.text();
+            try {
+              json = text ? (JSON.parse(text) as NonNullable<typeof json>) : {};
+            } catch {
+              json = null;
+            }
+            const gateway = status === 502 || status === 504 || json == null;
+            if (gateway && type === "discover" && attempt === 0) {
+              setTaskMessage("本步超时，继续发现");
+              continue;
+            }
+            break;
+          }
+          if (json == null) {
+            throw new Error(
+              status === 502 || status === 504 ? "发现本步超时" : "step 返回异常"
+            );
+          }
+          if (status < 200 || status >= 300) {
+            throw new Error(json.error ?? "step 失败");
+          }
           currentRunId = json.runId;
           const phase = String(json.phase ?? "");
           const next: RunProgress = {
@@ -342,11 +375,12 @@ export default function HomePage() {
             lastMessage = json.message;
             setTaskMessage(json.message);
           }
-          if (Array.isArray(json.events) && json.events.length > 0) {
+          const events = json.events;
+          if (Array.isArray(events) && events.length > 0) {
             if (type === "discover") {
-              setDiscoverLog((prev) => [...prev, ...json.events].slice(-200));
+              setDiscoverLog((prev) => [...prev, ...events].slice(-200));
             } else {
-              setPollLog((prev) => [...prev, ...json.events].slice(-200));
+              setPollLog((prev) => [...prev, ...events].slice(-200));
             }
           }
           if (json.suggestions) setSuggestions(json.suggestions);
@@ -514,7 +548,7 @@ export default function HomePage() {
             processed: s.running.progress?.processed ?? 0,
             total: s.running.progress?.total ?? 0,
             phase,
-            label: PHASE_LABEL[phase] ?? "发现扫描",
+            label: PHASE_LABEL[phase] ?? "抓取快照",
           });
           await driveSteps("discover", s.running.id);
           return;
@@ -534,8 +568,8 @@ export default function HomePage() {
       setDiscoverProgress({
         processed: 0,
         total: 0,
-        label: "发现扫描",
-        phase: "scan",
+        label: "抓取快照",
+        phase: "snapshot",
       });
       await driveSteps("discover", json.runId);
     } catch (e) {

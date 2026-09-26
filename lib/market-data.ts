@@ -65,6 +65,7 @@ export type ResolvedStock = {
 
 /** 行情端口。换数据源只换 getMarketData 的返回值。 */
 export type MarketData = {
+  fetchSnapshotSlice(offset: number, limit: number): Promise<SnapshotPage>;
   fetchSnapshotPage(page: number, pageSize?: number): Promise<SnapshotPage>;
   fetchDailyKlines(market: Market, code: string, lmt?: number): Promise<KlineBar[]>;
   fetchIntraday5m(market: Market, code: string, now?: Date): Promise<KlineBar[]>;

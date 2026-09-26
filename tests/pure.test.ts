@@ -22,6 +22,7 @@ import {
 } from "@/lib/jev";
 import { codeToMarket, limitPct, limitPrices, normalizeCode, toSecid } from "@/lib/market";
 import { buyGate, discoverCap, reconcilePool, sellGate } from "@/lib/rules";
+import { discoverBarCounts, legacyListCursor } from "@/lib/discover";
 import { isTradingSession, shanghaiYmd } from "@/lib/session";
 
 describe("market", () => {
@@ -478,5 +479,38 @@ describe("reconcilePool", () => {
       previousCodes: ["sz:000001", "sz:000002"],
     });
     expect(blocked.inserts).toEqual([]);
+  });
+});
+
+describe("discover progress", () => {
+  it("counts the bar from stocks already scanned", () => {
+    expect(
+      discoverBarCounts({ seen: 860, listTotal: 5120, batch: [] })
+    ).toEqual({ processed: 860, total: 5120 });
+    expect(discoverBarCounts({ seen: 0, listTotal: 0, batch: [] })).toEqual({
+      processed: 0,
+      total: 0,
+    });
+  });
+
+  it("converts an in-flight page cursor from the old page size", () => {
+    expect(
+      legacyListCursor({
+        snapshotSource: "biying",
+        snapshotPage: 3,
+        pageCursor: 40,
+      })
+    ).toBe(240);
+    expect(
+      discoverBarCounts({
+        snapshotSource: "biying",
+        snapshotPage: 3,
+        snapshotPages: 52,
+        pageCursor: 40,
+      })
+    ).toEqual({ processed: 240, total: 5200 });
+    expect(legacyListCursor({ snapshotSource: null, snapshotPage: 1, pageCursor: 0 })).toBe(
+      0
+    );
   });
 });

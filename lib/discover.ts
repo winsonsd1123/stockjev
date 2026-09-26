@@ -25,17 +25,27 @@ export type Suggestion = {
   status?: string;
 };
 
+export type PoolTrend = { id: number; maAlign: PoolAlign };
+
+export type DiscoverPhase = "snapshot" | "score" | "commit";
+
 export type DiscoverProgress = {
-  phase: "scan" | "commit";
+  phase: DiscoverPhase;
   snapshotSource: "biying" | null;
   snapshotPage: number;
   snapshotPages: number;
   pageCursor: number;
+  listCursor: number;
+  listTotal: number;
+  seen: number;
+  batch: MarketSnapshot[];
   scored: number;
   skipped: number;
   failedCodes: string[];
   suggestions: Suggestion[];
   indexBars: KlineBar[] | null;
+  poolTrends: PoolTrend[];
+  poolTrendDone: number[];
 };
 
 export type StepEvent = {
@@ -54,42 +64,109 @@ export type StepResult = {
   suggestions?: Suggestion[];
 };
 
-const MAX_SCORE_PER_STEP = 30;
-const MAX_SCAN_PER_STEP = 120;
+const SCAN_BATCH = 20;
+const SCORE_BATCH = 4;
+const STEP_BUDGET_MS = 40_000;
+export const LEGACY_PAGE_SIZE = 100;
+
+export function legacyListCursor(input: {
+  snapshotSource?: string | null;
+  snapshotPage?: number;
+  pageCursor?: number;
+}): number {
+  if (!input.snapshotSource) return 0;
+  const page = input.snapshotPage ?? 1;
+  const cursor = input.pageCursor ?? 0;
+  return Math.max(0, (page - 1) * LEGACY_PAGE_SIZE + cursor);
+}
 
 export function discoverBarCounts(progress: {
-  scored?: number;
-  skipped?: number;
+  seen?: number;
+  listTotal?: number;
   snapshotSource?: string | null;
+  snapshotPage?: number;
   snapshotPages?: number;
+  pageCursor?: number;
+  batch?: unknown;
 }): { processed: number; total: number } {
-  const processed = (progress.scored ?? 0) + (progress.skipped ?? 0);
-  const pages = progress.snapshotPages ?? 0;
-  const total =
-    progress.snapshotSource === "biying" && pages > 0
-      ? pages * 100
-      : processed + MAX_SCORE_PER_STEP;
-  return { processed, total: Math.max(total, processed) };
+  const legacy = !Array.isArray(progress.batch) && progress.seen == null;
+  const seen = legacy ? legacyListCursor(progress) : (progress.seen ?? 0);
+  let total = progress.listTotal ?? 0;
+  if (total <= 0 && legacy && (progress.snapshotPages ?? 0) > 0) {
+    total = (progress.snapshotPages ?? 0) * LEGACY_PAGE_SIZE;
+  }
+  if (total > 0) return { processed: Math.min(seen, total), total };
+  return { processed: seen, total: 0 };
 }
 
 function emptyProgress(): DiscoverProgress {
   return {
-    phase: "scan",
+    phase: "snapshot",
     snapshotSource: null,
     snapshotPage: 1,
     snapshotPages: 0,
     pageCursor: 0,
+    listCursor: 0,
+    listTotal: 0,
+    seen: 0,
+    batch: [],
     scored: 0,
     skipped: 0,
     failedCodes: [],
     suggestions: [],
     indexBars: null,
+    poolTrends: [],
+    poolTrendDone: [],
   };
 }
 
+function asPhase(value: unknown): DiscoverPhase {
+  if (value === "score" || value === "commit" || value === "snapshot") return value;
+  return "snapshot";
+}
+
 function asProgress(raw: unknown): DiscoverProgress {
-  if (!raw || typeof raw !== "object") return emptyProgress();
-  return { ...emptyProgress(), ...(raw as DiscoverProgress) };
+  const base = emptyProgress();
+  if (!raw || typeof raw !== "object") return base;
+  const src = raw as Record<string, unknown>;
+  const hasBatch = Array.isArray(src.batch);
+  const progress: DiscoverProgress = {
+    ...base,
+    phase: asPhase(src.phase),
+    snapshotSource: src.snapshotSource === "biying" ? "biying" : null,
+    snapshotPage: numField(src.snapshotPage, base.snapshotPage),
+    snapshotPages: numField(src.snapshotPages, 0),
+    pageCursor: numField(src.pageCursor, 0),
+    listCursor: numField(src.listCursor, 0),
+    listTotal: numField(src.listTotal, 0),
+    seen: numField(src.seen, 0),
+    batch: hasBatch ? (src.batch as MarketSnapshot[]) : [],
+    scored: numField(src.scored, 0),
+    skipped: numField(src.skipped, 0),
+    failedCodes: Array.isArray(src.failedCodes)
+      ? src.failedCodes.filter((c): c is string => typeof c === "string")
+      : [],
+    suggestions: Array.isArray(src.suggestions)
+      ? (src.suggestions as Suggestion[])
+      : [],
+    indexBars: Array.isArray(src.indexBars) ? (src.indexBars as KlineBar[]) : null,
+    poolTrends: Array.isArray(src.poolTrends) ? (src.poolTrends as PoolTrend[]) : [],
+    poolTrendDone: Array.isArray(src.poolTrendDone)
+      ? src.poolTrendDone.filter((id): id is number => typeof id === "number")
+      : [],
+  };
+  if (!hasBatch && progress.seen === 0 && progress.listCursor === 0) {
+    progress.listCursor = legacyListCursor(progress);
+    progress.seen = progress.listCursor;
+    if (progress.listTotal <= 0 && progress.snapshotPages > 0) {
+      progress.listTotal = progress.snapshotPages * LEGACY_PAGE_SIZE;
+    }
+  }
+  return progress;
+}
+
+function numField(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
 export async function getRunningRun(type: "discover" | "poll") {
@@ -272,29 +349,6 @@ async function scoreOne(
   }
 }
 
-async function loadPage(
-  progress: DiscoverProgress
-): Promise<{ items: MarketSnapshot[]; done: boolean }> {
-  const data = getMarketData();
-  if (!progress.snapshotSource) {
-    const first = await data.fetchSnapshotPage(1, 100);
-    progress.snapshotSource = "biying";
-    progress.snapshotPages = Math.max(1, Math.ceil(first.total / 100));
-    progress.snapshotPage = 1;
-    progress.pageCursor = 0;
-    console.log(
-      `[discover] biying pages=${progress.snapshotPages} total=${first.total}`
-    );
-    return { items: first.items, done: false };
-  }
-
-  if (progress.snapshotPage > progress.snapshotPages) {
-    return { items: [], done: true };
-  }
-  const page = await data.fetchSnapshotPage(progress.snapshotPage, 100);
-  return { items: page.items, done: false };
-}
-
 function asAlign(value: unknown): PoolAlign {
   if (value === "bull" || value === "bear" || value === "mixed") return value;
   return "mixed";
@@ -302,6 +356,7 @@ function asAlign(value: unknown): PoolAlign {
 
 async function syncWatchPool(
   runId: number,
+  trends: PoolTrend[],
   rows: {
     market: string;
     code: string;
@@ -343,24 +398,6 @@ async function syncWatchPool(
     .from("watchlist")
     .select("id,market,code,starred,bear_streak,score,confidence");
   if (poolError) throw poolError;
-
-  const trends: { id: number; maAlign: PoolAlign }[] = [];
-  for (const row of poolRows ?? []) {
-    try {
-      const bars = await getMarketData().fetchDailyKlines(
-        row.market as Market,
-        row.code as string,
-        120
-      );
-      if (bars.length === 0) continue;
-      trends.push({
-        id: row.id as number,
-        maAlign: deriveDailyFeatures(bars).maAlign,
-      });
-    } catch {
-      continue;
-    }
-  }
 
   const { data: prevRun } = await sb
     .from("runs")
@@ -474,132 +511,251 @@ export async function stepDiscover(runId?: number): Promise<StepResult> {
     throw new Error("没有进行中的 discover 任务");
   }
 
+  const until = Date.now() + STEP_BUDGET_MS;
   const progress = asProgress(run.progress);
   const events: StepEvent[] = [];
-  if (!progress.indexBars) {
-    try {
-      progress.indexBars = await getMarketData().fetchDailyKlines("sh", "000001", 120);
-    } catch {
-      progress.indexBars = [];
-    }
-  }
-  let scoredThisStep = 0;
-  let scannedThisStep = 0;
+  const ran = progress.phase;
+  const activeId = run.id as number;
 
-  while (scoredThisStep < MAX_SCORE_PER_STEP && scannedThisStep < MAX_SCAN_PER_STEP) {
-    const { items, done } = await loadPage(progress);
-    if (done || items.length === 0) {
-      progress.phase = "commit";
-      break;
+  if (ran === "commit") {
+    const ready = await pullPoolTrends(progress, until);
+    if (!ready) {
+      await saveProgress(activeId, progress);
+      const message = `正在读取观察池趋势 ${progress.poolTrendDone.length} 只`;
+      console.log(`[discover] step ${message}`);
+      return openResult(activeId, progress, "commit", message, events);
     }
-
-    while (
-      progress.pageCursor < items.length &&
-      scoredThisStep < MAX_SCORE_PER_STEP &&
-      scannedThisStep < MAX_SCAN_PER_STEP
-    ) {
-      const snap = items[progress.pageCursor];
-      progress.pageCursor += 1;
-      scannedThisStep += 1;
-      const gate = shouldScore(snap);
-      if (!gate.ok) {
-        progress.skipped += 1;
-        events.push({
-          level: "info",
-          text: `${snap.code} ${snap.name} 跳过：${gate.reason}`,
-        });
-        continue;
-      }
-      const ev = await scoreOne(run.id as number, snap, progress.indexBars);
-      events.push(ev);
-      if (ev.level === "ok") {
-        progress.scored += 1;
-        scoredThisStep += 1;
-      } else if (ev.level === "fail") {
-        progress.failedCodes.push(snap.code);
-        scoredThisStep += 1;
-      } else {
-        // 近5日均额不足等：已拉日K，计入跳过与本步配额
-        progress.skipped += 1;
-        scoredThisStep += 1;
-      }
-    }
-
-    if (progress.pageCursor >= items.length) {
-      progress.snapshotPage += 1;
-      progress.pageCursor = 0;
-      if (
-        progress.snapshotSource === "biying" &&
-        progress.snapshotPage > progress.snapshotPages
-      ) {
-        progress.phase = "commit";
-        break;
-      }
-    }
-
-    if (scoredThisStep >= MAX_SCORE_PER_STEP) break;
+    await saveProgress(activeId, progress);
+    return finishCommit(activeId, progress, events);
   }
 
-  if (progress.phase === "commit") {
-    const { data: rows, error } = await sb
-      .from("judgments")
-      .select("market,code,probability,details,prompt")
-      .eq("run_id", run.id)
-      .eq("kind", "score")
-      .order("probability", { ascending: false })
-      .limit(10);
-    if (error) throw error;
+  if (ran === "score") await runScore(activeId, progress, events, until);
+  else await runSnapshot(progress, events, until);
 
-    const synced = await syncWatchPool(
-      run.id as number,
-      (rows ?? []).map((r) => ({
-        market: r.market as string,
-        code: r.code as string,
-        probability: Number(r.probability),
-        details: r.details,
-        prompt: r.prompt,
-      }))
-    );
-    const suggestions = synced.suggestions;
-    progress.suggestions = suggestions;
-    await completeRun(run.id as number, progress);
-    console.log(
-      `[discover] done scored=${progress.scored} suggestions=${suggestions.length} removed=${synced.removed} inserted=${synced.inserted}`
-    );
-    const scanned = progress.scored + progress.skipped;
-    return {
-      done: true,
-      processed: scanned,
-      total: scanned,
-      runId: run.id as number,
-      phase: "commit",
-      message: `发现完成，移出 ${synced.removed}，补入 ${synced.inserted}`,
-      events: [
-        ...events,
-        {
-          level: "info",
-          text: `发现完成，打分 ${progress.scored}，跳过 ${progress.skipped}，移出 ${synced.removed}，补入 ${synced.inserted}`,
-        },
-        ...suggestions.map((s, i) => ({
-          level: "ok" as const,
-          text: `${i + 1}. ${s.code} ${s.name}  ${s.score}`,
-        })),
-      ],
-      suggestions,
-    };
-  }
-
-  await saveProgress(run.id as number, progress);
-  const bar = discoverBarCounts(progress);
-  const message = `打分 ${progress.scored} · 跳过 ${progress.skipped} · 页 ${progress.snapshotPage}`;
+  await saveProgress(activeId, progress);
+  const message =
+    ran === "score"
+      ? `本批剩余 ${progress.batch.length} · 累计打分 ${progress.scored} · 跳过 ${progress.skipped}`
+      : `已扫 ${progress.seen}/${progress.listTotal || "—"} · 本批待打分 ${progress.batch.length}`;
   console.log(`[discover] step ${message}`);
+  return openResult(activeId, progress, ran, message, events);
+}
+
+function listFinished(progress: DiscoverProgress): boolean {
+  return progress.snapshotSource != null && progress.listCursor >= progress.listTotal;
+}
+
+function expired(until: number): boolean {
+  return Date.now() >= until;
+}
+
+function openResult(
+  runId: number,
+  progress: DiscoverProgress,
+  phase: DiscoverPhase,
+  message: string,
+  events: StepEvent[],
+  done = false,
+  suggestions?: Suggestion[]
+): StepResult {
+  const bar = discoverBarCounts(progress);
   return {
-    done: false,
+    done,
     processed: bar.processed,
-    total: bar.total,
-    runId: run.id as number,
-    phase: "scan",
+    total: bar.total > 0 ? bar.total : bar.processed,
+    runId,
+    phase,
     message,
     events,
+    suggestions,
   };
+}
+
+async function ensureIndex(progress: DiscoverProgress, until: number) {
+  if (progress.indexBars || expired(until)) return;
+  try {
+    progress.indexBars = await getMarketData().fetchDailyKlines("sh", "000001", 120);
+  } catch {
+    progress.indexBars = [];
+  }
+}
+
+async function hasScore(runId: number, market: string, code: string): Promise<boolean> {
+  const sb = getSupabase();
+  const { data, error } = await sb
+    .from("judgments")
+    .select("id")
+    .eq("run_id", runId)
+    .eq("market", market)
+    .eq("code", code)
+    .eq("kind", "score")
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  return data != null;
+}
+
+async function runSnapshot(
+  progress: DiscoverProgress,
+  events: StepEvent[],
+  until: number
+) {
+  await ensureIndex(progress, until);
+  if (listFinished(progress)) {
+    progress.phase = progress.batch.length > 0 ? "score" : "commit";
+    return;
+  }
+  const data = getMarketData();
+  let fetched = 0;
+  while (fetched < SCAN_BATCH && !expired(until)) {
+    if (listFinished(progress)) break;
+    const page = await data.fetchSnapshotSlice(progress.listCursor, 1);
+    progress.snapshotSource = "biying";
+    progress.listTotal = page.total;
+    progress.snapshotPages = page.total === 0 ? 0 : Math.ceil(page.total / LEGACY_PAGE_SIZE);
+    if (fetched === 0) {
+      console.log(`[discover] biying total=${page.total} cursor=${progress.listCursor}`);
+    }
+    if (page.items.length === 0) break;
+    const snap = page.items[0];
+    progress.listCursor += 1;
+    progress.seen += 1;
+    fetched += 1;
+    const gate = shouldScore(snap);
+    if (!gate.ok) {
+      progress.skipped += 1;
+      events.push({
+        level: "info",
+        text: `${snap.code} ${snap.name} 跳过：${gate.reason}`,
+      });
+      console.log(`[discover] skip ${snap.code} ${snap.name} ${gate.reason}`);
+      continue;
+    }
+    progress.batch.push(snap);
+  }
+  if (progress.batch.length > 0) progress.phase = "score";
+  else if (listFinished(progress)) progress.phase = "commit";
+  else progress.phase = "snapshot";
+}
+
+async function runScore(
+  runId: number,
+  progress: DiscoverProgress,
+  events: StepEvent[],
+  until: number
+) {
+  await ensureIndex(progress, until);
+  let scoredThis = 0;
+  while (progress.batch.length > 0 && scoredThis < SCORE_BATCH && !expired(until)) {
+    const snap = progress.batch[0];
+    if (await hasScore(runId, snap.market, snap.code)) {
+      events.push({
+        level: "info",
+        text: `${snap.code} ${snap.name} 已有打分，跳过`,
+      });
+      progress.batch.shift();
+      scoredThis += 1;
+      continue;
+    }
+    const ev = await scoreOne(runId, snap, progress.indexBars);
+    events.push(ev);
+    if (ev.level === "ok") progress.scored += 1;
+    else if (ev.level === "fail") progress.failedCodes.push(snap.code);
+    else progress.skipped += 1;
+    progress.batch.shift();
+    scoredThis += 1;
+  }
+  if (progress.batch.length > 0) progress.phase = "score";
+  else progress.phase = listFinished(progress) ? "commit" : "snapshot";
+}
+
+async function pullPoolTrends(progress: DiscoverProgress, until: number): Promise<boolean> {
+  const sb = getSupabase();
+  const { data: poolRows, error } = await sb.from("watchlist").select("id,market,code");
+  if (error) throw error;
+  const done = new Set(progress.poolTrendDone);
+  const trends = [...progress.poolTrends];
+  for (const row of poolRows ?? []) {
+    const id = row.id as number;
+    if (done.has(id)) continue;
+    if (expired(until)) {
+      progress.poolTrends = trends;
+      progress.poolTrendDone = [...done];
+      return false;
+    }
+    try {
+      const bars = await getMarketData().fetchDailyKlines(
+        row.market as Market,
+        row.code as string,
+        120
+      );
+      if (bars.length > 0) {
+        trends.push({
+          id,
+          maAlign: deriveDailyFeatures(bars).maAlign,
+        });
+      }
+    } catch {
+      /* 单只失败记为已尝试，下一步不再卡住 */
+    }
+    done.add(id);
+  }
+  progress.poolTrends = trends;
+  progress.poolTrendDone = [...done];
+  return true;
+}
+
+async function finishCommit(
+  runId: number,
+  progress: DiscoverProgress,
+  events: StepEvent[]
+): Promise<StepResult> {
+  const sb = getSupabase();
+  const { data: rows, error } = await sb
+    .from("judgments")
+    .select("market,code,probability,details,prompt")
+    .eq("run_id", runId)
+    .eq("kind", "score")
+    .order("probability", { ascending: false })
+    .limit(10);
+  if (error) throw error;
+
+  const synced = await syncWatchPool(
+    runId,
+    progress.poolTrends,
+    (rows ?? []).map((r) => ({
+      market: r.market as string,
+      code: r.code as string,
+      probability: Number(r.probability),
+      details: r.details,
+      prompt: r.prompt,
+    }))
+  );
+  const suggestions = synced.suggestions;
+  progress.suggestions = suggestions;
+  progress.phase = "commit";
+  await completeRun(runId, progress);
+  console.log(
+    `[discover] done scored=${progress.scored} suggestions=${suggestions.length} removed=${synced.removed} inserted=${synced.inserted}`
+  );
+  const doneEvents: StepEvent[] = [
+    ...events,
+    {
+      level: "info",
+      text: `发现完成，打分 ${progress.scored}，跳过 ${progress.skipped}，移出 ${synced.removed}，补入 ${synced.inserted}`,
+    },
+    ...suggestions.map((s, i) => ({
+      level: "ok" as const,
+      text: `${i + 1}. ${s.code} ${s.name}  ${s.score}`,
+    })),
+  ];
+  return openResult(
+    runId,
+    progress,
+    "commit",
+    `发现完成，移出 ${synced.removed}，补入 ${synced.inserted}`,
+    doneEvents,
+    true,
+    suggestions
+  );
 }
