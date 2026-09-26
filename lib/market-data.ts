@@ -51,6 +51,17 @@ export type SnapshotPage = {
   total: number;
 };
 
+export type ListedStock = {
+  market: Market;
+  code: string;
+  name: string;
+};
+
+export type ListedSlice = {
+  items: ListedStock[];
+  total: number;
+};
+
 export type IndexContext = {
   intraday5m: KlineBar[];
   daily5: KlineBar[];
@@ -65,6 +76,8 @@ export type ResolvedStock = {
 
 /** 行情端口。换数据源只换 getMarketData 的返回值。 */
 export type MarketData = {
+  fetchListedSlice(offset: number, limit: number): Promise<ListedSlice>;
+  fetchOneSnapshot(item: ListedStock): Promise<MarketSnapshot>;
   fetchSnapshotSlice(offset: number, limit: number): Promise<SnapshotPage>;
   fetchSnapshotPage(page: number, pageSize?: number): Promise<SnapshotPage>;
   fetchDailyKlines(market: Market, code: string, lmt?: number): Promise<KlineBar[]>;

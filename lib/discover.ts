@@ -1,6 +1,7 @@
 import {
   getMarketData,
   type KlineBar,
+  type ListedStock,
   type MarketSnapshot,
 } from "@/lib/market-data";
 import {
@@ -64,9 +65,9 @@ export type StepResult = {
   suggestions?: Suggestion[];
 };
 
-const SCAN_BATCH = 20;
-const SCORE_BATCH = 4;
-const STEP_BUDGET_MS = 40_000;
+const QUOTE_WAVE = 6;
+const SCORE_WAVE = 3;
+const LAUNCH_BUDGET_MS = 35_000;
 export const LEGACY_PAGE_SIZE = 100;
 
 export function legacyListCursor(input: {
@@ -97,6 +98,22 @@ export function discoverBarCounts(progress: {
   }
   if (total > 0) return { processed: Math.min(seen, total), total };
   return { processed: seen, total: 0 };
+}
+
+export function discoverProgressMessage(progress: {
+  seen?: number;
+  listTotal?: number;
+  pending?: number;
+  batch?: unknown;
+  scored?: number;
+  skipped?: number;
+}): string {
+  const seen = progress.seen ?? 0;
+  const total = progress.listTotal && progress.listTotal > 0 ? progress.listTotal : "—";
+  const pending = Array.isArray(progress.batch)
+    ? progress.batch.length
+    : (progress.pending ?? 0);
+  return `已扫 ${seen}/${total} · 待打分 ${pending} · 累计打分 ${progress.scored ?? 0} · 跳过 ${progress.skipped ?? 0}`;
 }
 
 function emptyProgress(): DiscoverProgress {
@@ -511,34 +528,42 @@ export async function stepDiscover(runId?: number): Promise<StepResult> {
     throw new Error("没有进行中的 discover 任务");
   }
 
-  const until = Date.now() + STEP_BUDGET_MS;
+  const until = Date.now() + LAUNCH_BUDGET_MS;
   const progress = asProgress(run.progress);
   const events: StepEvent[] = [];
   const ran = progress.phase;
   const activeId = run.id as number;
+  const persist = () => saveProgress(activeId, progress);
 
   if (ran === "commit") {
     const ready = await pullPoolTrends(progress, until);
     if (!ready) {
-      await saveProgress(activeId, progress);
+      await persist();
       const message = `正在读取观察池趋势 ${progress.poolTrendDone.length} 只`;
       console.log(`[discover] step ${message}`);
       return openResult(activeId, progress, "commit", message, events);
     }
-    await saveProgress(activeId, progress);
+    await persist();
     return finishCommit(activeId, progress, events);
   }
 
-  if (ran === "score") await runScore(activeId, progress, events, until);
-  else await runSnapshot(progress, events, until);
+  if (ran === "score") {
+    await runScore(activeId, progress, events, until, persist);
+    if (progress.batch.length === 0 && !expired(until)) {
+      await runSnapshot(progress, events, until, persist);
+    }
+  } else {
+    await runSnapshot(progress, events, until, persist);
+    if (progress.batch.length > 0 && !expired(until)) {
+      await runScore(activeId, progress, events, until, persist);
+    }
+  }
 
-  await saveProgress(activeId, progress);
-  const message =
-    ran === "score"
-      ? `本批剩余 ${progress.batch.length} · 累计打分 ${progress.scored} · 跳过 ${progress.skipped}`
-      : `已扫 ${progress.seen}/${progress.listTotal || "—"} · 本批待打分 ${progress.batch.length}`;
+  settlePhase(progress);
+  await persist();
+  const message = discoverProgressMessage(progress);
   console.log(`[discover] step ${message}`);
-  return openResult(activeId, progress, ran, message, events);
+  return openResult(activeId, progress, progress.phase, message, events);
 }
 
 function listFinished(progress: DiscoverProgress): boolean {
@@ -547,6 +572,16 @@ function listFinished(progress: DiscoverProgress): boolean {
 
 function expired(until: number): boolean {
   return Date.now() >= until;
+}
+
+function isStName(name: string): boolean {
+  return /ST/i.test(name);
+}
+
+function settlePhase(progress: DiscoverProgress) {
+  if (progress.batch.length > 0) progress.phase = "score";
+  else if (listFinished(progress)) progress.phase = "commit";
+  else progress.phase = "snapshot";
 }
 
 function openResult(
@@ -595,78 +630,136 @@ async function hasScore(runId: number, market: string, code: string): Promise<bo
   return data != null;
 }
 
+async function ensureList(progress: DiscoverProgress) {
+  if (progress.snapshotSource && progress.listTotal > 0) return;
+  const page = await getMarketData().fetchListedSlice(0, 1);
+  progress.snapshotSource = "biying";
+  progress.listTotal = page.total;
+  progress.snapshotPages = page.total === 0 ? 0 : Math.ceil(page.total / LEGACY_PAGE_SIZE);
+  console.log(`[discover] biying total=${page.total} cursor=${progress.listCursor}`);
+}
+
+async function takeQuoteWave(progress: DiscoverProgress): Promise<{
+  wave: ListedStock[];
+  stCount: number;
+}> {
+  const wave: ListedStock[] = [];
+  let stCount = 0;
+  while (wave.length < QUOTE_WAVE && progress.listCursor < progress.listTotal) {
+    const page = await getMarketData().fetchListedSlice(progress.listCursor, 1);
+    progress.listTotal = page.total;
+    if (page.items.length === 0) {
+      progress.listCursor = page.total;
+      break;
+    }
+    const item = page.items[0];
+    progress.listCursor += 1;
+    progress.seen += 1;
+    if (isStName(item.name)) {
+      progress.skipped += 1;
+      stCount += 1;
+      continue;
+    }
+    wave.push(item);
+  }
+  return { wave, stCount };
+}
+
 async function runSnapshot(
   progress: DiscoverProgress,
   events: StepEvent[],
-  until: number
+  until: number,
+  persist: () => Promise<void>
 ) {
   await ensureIndex(progress, until);
-  if (listFinished(progress)) {
-    progress.phase = progress.batch.length > 0 ? "score" : "commit";
-    return;
-  }
-  const data = getMarketData();
-  let fetched = 0;
-  while (fetched < SCAN_BATCH && !expired(until)) {
-    if (listFinished(progress)) break;
-    const page = await data.fetchSnapshotSlice(progress.listCursor, 1);
-    progress.snapshotSource = "biying";
-    progress.listTotal = page.total;
-    progress.snapshotPages = page.total === 0 ? 0 : Math.ceil(page.total / LEGACY_PAGE_SIZE);
-    if (fetched === 0) {
-      console.log(`[discover] biying total=${page.total} cursor=${progress.listCursor}`);
+  await ensureList(progress);
+  if (listFinished(progress)) return;
+  while (!expired(until) && !listFinished(progress)) {
+    const { wave, stCount } = await takeQuoteWave(progress);
+    if (stCount > 0) {
+      events.push({ level: "info", text: `跳过 ST ${stCount} 只` });
     }
-    if (page.items.length === 0) break;
-    const snap = page.items[0];
-    progress.listCursor += 1;
-    progress.seen += 1;
-    fetched += 1;
-    const gate = shouldScore(snap);
-    if (!gate.ok) {
-      progress.skipped += 1;
-      events.push({
-        level: "info",
-        text: `${snap.code} ${snap.name} 跳过：${gate.reason}`,
-      });
-      console.log(`[discover] skip ${snap.code} ${snap.name} ${gate.reason}`);
-      continue;
+    if (wave.length === 0) break;
+    const snaps = await Promise.all(
+      wave.map(async (item) => {
+        try {
+          return { item, snap: await getMarketData().fetchOneSnapshot(item) };
+        } catch (e) {
+          const reason = e instanceof Error ? e.message : "行情失败";
+          return { item, reason };
+        }
+      })
+    );
+    for (const row of snaps) {
+      if ("reason" in row && row.reason) {
+        progress.failedCodes.push(row.item.code);
+        events.push({
+          level: "fail",
+          text: `${row.item.code} ${row.item.name} 失败：${row.reason}`,
+        });
+        console.log(`[discover] fail ${row.item.code} ${row.reason}`);
+        continue;
+      }
+      const snap = row.snap;
+      if (!snap) continue;
+      const gate = shouldScore(snap);
+      if (!gate.ok) {
+        progress.skipped += 1;
+        events.push({
+          level: "info",
+          text: `${snap.code} ${snap.name} 跳过：${gate.reason}`,
+        });
+        console.log(`[discover] skip ${snap.code} ${snap.name} ${gate.reason}`);
+        continue;
+      }
+      progress.batch.push(snap);
     }
-    progress.batch.push(snap);
+    settlePhase(progress);
+    await persist();
   }
-  if (progress.batch.length > 0) progress.phase = "score";
-  else if (listFinished(progress)) progress.phase = "commit";
-  else progress.phase = "snapshot";
+}
+
+async function scoreWaveItem(
+  runId: number,
+  snap: MarketSnapshot,
+  indexBars: KlineBar[] | null
+): Promise<{ snap: MarketSnapshot; ev: StepEvent; kind: "dup" | "ok" | "fail" | "skip" }> {
+  if (await hasScore(runId, snap.market, snap.code)) {
+    return {
+      snap,
+      kind: "dup",
+      ev: { level: "info", text: `${snap.code} ${snap.name} 已有打分，跳过` },
+    };
+  }
+  const ev = await scoreOne(runId, snap, indexBars);
+  if (ev.level === "ok") return { snap, ev, kind: "ok" };
+  if (ev.level === "fail") return { snap, ev, kind: "fail" };
+  return { snap, ev, kind: "skip" };
 }
 
 async function runScore(
   runId: number,
   progress: DiscoverProgress,
   events: StepEvent[],
-  until: number
+  until: number,
+  persist: () => Promise<void>
 ) {
   await ensureIndex(progress, until);
-  let scoredThis = 0;
-  while (progress.batch.length > 0 && scoredThis < SCORE_BATCH && !expired(until)) {
-    const snap = progress.batch[0];
-    if (await hasScore(runId, snap.market, snap.code)) {
-      events.push({
-        level: "info",
-        text: `${snap.code} ${snap.name} 已有打分，跳过`,
-      });
-      progress.batch.shift();
-      scoredThis += 1;
-      continue;
+  while (progress.batch.length > 0 && !expired(until)) {
+    const wave = progress.batch.slice(0, SCORE_WAVE);
+    const results = await Promise.all(
+      wave.map((snap) => scoreWaveItem(runId, snap, progress.indexBars))
+    );
+    progress.batch.splice(0, results.length);
+    for (const row of results) {
+      events.push(row.ev);
+      if (row.kind === "ok") progress.scored += 1;
+      else if (row.kind === "fail") progress.failedCodes.push(row.snap.code);
+      else if (row.kind === "skip") progress.skipped += 1;
     }
-    const ev = await scoreOne(runId, snap, progress.indexBars);
-    events.push(ev);
-    if (ev.level === "ok") progress.scored += 1;
-    else if (ev.level === "fail") progress.failedCodes.push(snap.code);
-    else progress.skipped += 1;
-    progress.batch.shift();
-    scoredThis += 1;
+    settlePhase(progress);
+    await persist();
   }
-  if (progress.batch.length > 0) progress.phase = "score";
-  else progress.phase = listFinished(progress) ? "commit" : "snapshot";
 }
 
 async function pullPoolTrends(progress: DiscoverProgress, until: number): Promise<boolean> {

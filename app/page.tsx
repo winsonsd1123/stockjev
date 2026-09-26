@@ -49,6 +49,7 @@ type Status = {
       total?: number;
       phase?: string;
       scored?: number;
+      message?: string;
       suggestions?: Suggestion[];
     };
   } | null;
@@ -321,6 +322,28 @@ export default function HomePage() {
           setTaskMessage(
             type === "discover" ? "正在推进发现…" : "正在推进盘中判定…"
           );
+          let statusTimer: ReturnType<typeof setInterval> | null = null;
+          if (type === "discover") {
+            const pullBar = async () => {
+              try {
+                const s = await fetchStatus();
+                const p = s.running?.type === "discover" ? s.running.progress : null;
+                if (!p?.message) return;
+                setDiscoverProgress({
+                  processed: p.processed ?? 0,
+                  total: p.total ?? 0,
+                  phase: p.phase ?? "",
+                  label: p.message,
+                });
+                setTaskMessage(p.message);
+              } catch {
+                /* 进度刷新失败不影响本步 */
+              }
+            };
+            statusTimer = setInterval(() => void pullBar(), 2000);
+            void pullBar();
+          }
+          try {
           let json: {
             error?: string;
             runId?: number;
@@ -367,7 +390,10 @@ export default function HomePage() {
             processed: json.processed ?? 0,
             total: json.total ?? 0,
             phase,
-            label: PHASE_LABEL[phase] ?? phase,
+            label:
+              type === "discover"
+                ? (json.message ?? PHASE_LABEL[phase] ?? phase)
+                : (PHASE_LABEL[phase] ?? phase),
           };
           if (type === "discover") setDiscoverProgress(next);
           else setPollProgress(next);
@@ -388,6 +414,9 @@ export default function HomePage() {
             await refreshLists({ highlight: true });
           }
           done = Boolean(json.done);
+          } finally {
+            if (statusTimer) clearInterval(statusTimer);
+          }
         }
         if (type === "discover") {
           const doneText = lastMessage || "发现完成";
@@ -466,7 +495,10 @@ export default function HomePage() {
               0,
             total: s.running.progress?.total ?? 0,
             phase,
-            label: PHASE_LABEL[phase] ?? s.running.type,
+            label:
+              s.running.type === "discover"
+                ? (s.running.progress?.message ?? PHASE_LABEL[phase] ?? s.running.type)
+                : (PHASE_LABEL[phase] ?? s.running.type),
           };
           if (s.running.type === "discover") {
             setDiscoverProgress(next);
@@ -548,7 +580,7 @@ export default function HomePage() {
             processed: s.running.progress?.processed ?? 0,
             total: s.running.progress?.total ?? 0,
             phase,
-            label: PHASE_LABEL[phase] ?? "抓取快照",
+            label: s.running.progress?.message ?? PHASE_LABEL[phase] ?? "抓取快照",
           });
           await driveSteps("discover", s.running.id);
           return;
@@ -745,7 +777,9 @@ export default function HomePage() {
     activeTab === "watch" && discoverBusy
       ? {
           tab: "discover" as const,
-          text: `发现中 ${discoverProgress.processed}/${discoverProgress.total || "—"} · ${discoverProgress.label || taskMessage || "进行中"}`,
+          text: taskMessage
+            ? `发现中 · ${taskMessage}`
+            : `发现中 ${discoverProgress.processed}/${discoverProgress.total || "—"} · ${discoverProgress.label || "进行中"}`,
         }
       : activeTab === "discover" && pollBusy
         ? {
@@ -1214,9 +1248,8 @@ export default function HomePage() {
                 <div className="mb-1 flex justify-between text-xs text-zinc-500">
                   <span>
                     {discoverBusy
-                      ? discoverProgress.label || "发现进度"
+                      ? taskMessage || discoverProgress.label || "正在推进发现…"
                       : "发现进度"}
-                    {discoverBusy && taskMessage ? ` · ${taskMessage}` : ""}
                   </span>
                   <span>
                     {discoverProgress.processed}/

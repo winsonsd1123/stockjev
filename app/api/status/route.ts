@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { anyRunningRun, discoverBarCounts } from "@/lib/discover";
+import { anyRunningRun, discoverBarCounts, discoverProgressMessage } from "@/lib/discover";
 import { getMarketData } from "@/lib/market-data";
 import { lastCompletedPollAt } from "@/lib/poll";
 import { isTradingSession } from "@/lib/session";
@@ -12,15 +12,32 @@ function runningProgress(type: string, progress: unknown) {
   if (type !== "discover" || !progress || typeof progress !== "object") {
     return slim;
   }
+  const raw = progress as Record<string, unknown>;
   const bar = discoverBarCounts(
-    progress as {
-      scored?: number;
-      skipped?: number;
+    raw as {
+      seen?: number;
+      listTotal?: number;
       snapshotSource?: string | null;
+      snapshotPage?: number;
       snapshotPages?: number;
+      pageCursor?: number;
+      batch?: unknown;
     }
   );
-  return { ...slim, processed: bar.processed, total: bar.total };
+  const pending = Array.isArray(raw.batch) ? raw.batch.length : 0;
+  const phase = typeof raw.phase === "string" ? raw.phase : "";
+  const trendDone = Array.isArray(raw.poolTrendDone) ? raw.poolTrendDone.length : 0;
+  const message =
+    phase === "commit"
+      ? `正在读取观察池趋势 ${trendDone} 只`
+      : discoverProgressMessage({
+          seen: bar.processed,
+          listTotal: bar.total,
+          pending,
+          scored: typeof raw.scored === "number" ? raw.scored : 0,
+          skipped: typeof raw.skipped === "number" ? raw.skipped : 0,
+        });
+  return { ...slim, processed: bar.processed, total: bar.total, pending, message };
 }
 
 function slimProgress(progress: unknown) {

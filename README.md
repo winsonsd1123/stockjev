@@ -67,7 +67,7 @@ npm run dev
 | 端点 | 方法 | 作用 |
 |---|---|---|
 | `/api/discover` | POST | 创建发现任务 |
-| `/api/discover/step` | POST | 推进一批发现（每步约 20 只快照，或约 4 只打分） |
+| `/api/discover/step` | POST | 推进一批发现（每步用满约 40 秒，进度在这一步进行中更新） |
 | `/api/poll` | POST | 创建一轮轮询 |
 | `/api/poll/step` | POST | 推进一批轮询（每批约 10 只，先观察池后持仓） |
 | `/api/watchlist` | GET / POST / DELETE | 观察池 |

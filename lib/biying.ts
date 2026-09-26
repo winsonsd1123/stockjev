@@ -1,15 +1,15 @@
 import { codeToMarket, type Market } from "@/lib/market";
 import type {
   KlineBar,
+  ListedStock,
   MarketData,
   MarketSnapshot,
   QuoteLite,
 } from "@/lib/market-data";
 import { shanghaiYmd } from "@/lib/session";
 
-const WINDOW_MS = 60_000;
-const MAX_PER_WINDOW = 240;
-const MIN_GAP_MS = 250;
+const CONCURRENCY = 6;
+const BACKOFF_MS = 2_000;
 const LIST_TTL_MS = 60 * 60 * 1000;
 const QUOTE_TTL_MS = 10 * 60 * 1000;
 
@@ -40,12 +40,16 @@ type RawBar = {
   a?: number;
 };
 
-type RateGate = { chain: Promise<void>; stamps: number[] };
+type RateGate = {
+  active: number;
+  waiters: Array<() => void>;
+  pauseUntil: number;
+};
 
 function rateGate(): RateGate {
   const g = globalThis as typeof globalThis & { __biyingRateGate?: RateGate };
-  if (!g.__biyingRateGate) {
-    g.__biyingRateGate = { chain: Promise.resolve(), stamps: [] };
+  if (!g.__biyingRateGate || typeof g.__biyingRateGate.active !== "number") {
+    g.__biyingRateGate = { active: 0, waiters: [], pauseUntil: 0 };
   }
   return g.__biyingRateGate;
 }
@@ -60,49 +64,67 @@ function licence(): string {
   return key;
 }
 
-function withQueue<T>(fn: () => Promise<T>): Promise<T> {
+async function acquireSlot(): Promise<void> {
   const gate = rateGate();
-  const run = async () => {
-    for (;;) {
-      const now = Date.now();
-      gate.stamps = gate.stamps.filter((t) => now - t < WINDOW_MS);
-      const last = gate.stamps[gate.stamps.length - 1];
-      if (gate.stamps.length >= MAX_PER_WINDOW) {
-        await sleep(WINDOW_MS - (now - gate.stamps[0]) + 20);
-        continue;
-      }
-      if (last != null && now - last < MIN_GAP_MS) {
-        await sleep(MIN_GAP_MS - (now - last));
-        continue;
-      }
-      gate.stamps.push(Date.now());
-      return fn();
+  for (;;) {
+    const wait = gate.pauseUntil - Date.now();
+    if (wait > 0) {
+      await sleep(wait);
+      continue;
     }
-  };
-  const next = gate.chain.then(run, run);
-  gate.chain = next.then(
-    () => undefined,
-    () => undefined
-  );
-  return next;
+    if (gate.active < CONCURRENCY) {
+      gate.active += 1;
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      gate.waiters.push(resolve);
+    });
+  }
+}
+
+function releaseSlot() {
+  const gate = rateGate();
+  gate.active = Math.max(0, gate.active - 1);
+  const next = gate.waiters.shift();
+  if (next) next();
+}
+
+function pauseQueue() {
+  const gate = rateGate();
+  gate.pauseUntil = Math.max(gate.pauseUntil, Date.now() + BACKOFF_MS);
 }
 
 async function biyingGet(url: string): Promise<unknown> {
-  return withQueue(async () => {
-    const res = await fetch(url, {
-      cache: "no-store",
-      signal: AbortSignal.timeout(15000),
-    });
-    const text = await res.text();
-    if (!res.ok) {
-      throw new Error(`必盈请求失败 ${res.status} ${text.slice(0, 80)}`);
-    }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await acquireSlot();
+    let retry = false;
     try {
-      return JSON.parse(text) as unknown;
-    } catch {
-      throw new Error(`必盈返回非 JSON ${text.slice(0, 80)}`);
+      const res = await fetch(url, {
+        cache: "no-store",
+        signal: AbortSignal.timeout(15000),
+      });
+      const text = await res.text();
+      if ((res.status === 429 || res.status === 503) && attempt === 0) {
+        pauseQueue();
+        retry = true;
+      } else if (!res.ok) {
+        throw new Error(`必盈请求失败 ${res.status} ${text.slice(0, 80)}`);
+      } else {
+        try {
+          return JSON.parse(text) as unknown;
+        } catch {
+          throw new Error(`必盈返回非 JSON ${text.slice(0, 80)}`);
+        }
+      }
+    } finally {
+      releaseSlot();
     }
-  });
+    if (retry) {
+      const wait = rateGate().pauseUntil - Date.now();
+      if (wait > 0) await sleep(wait);
+    }
+  }
+  throw new Error("必盈请求失败 429");
 }
 
 function num(v: unknown, fallback = 0): number {
@@ -255,8 +277,10 @@ async function loadBars(
   lmt: number
 ) {
   if (lmt <= 5) return latestBars(symbol, level, adjust, lmt);
-  const hist = await historyBars(symbol, level, adjust, lmt);
-  const fresh = await latestBars(symbol, level, adjust, 5);
+  const [hist, fresh] = await Promise.all([
+    historyBars(symbol, level, adjust, lmt),
+    latestBars(symbol, level, adjust, 5),
+  ]);
   const key = (b: KlineBar) => (level === "d" ? dayKey(b.date) : b.date);
   const seen = new Set(hist.map(key));
   const extra = fresh.filter((b) => !seen.has(key(b)));
@@ -280,6 +304,21 @@ function toQuote(snap: MarketSnapshot, q: Realtime): QuoteLite {
   };
 }
 
+async function listedSlice(
+  offset: number,
+  limit: number
+): Promise<{ items: ListedStock[]; total: number }> {
+  const list = await stockList();
+  const start = Math.max(0, offset);
+  const size = Math.max(0, limit);
+  const items = list.slice(start, start + size).map((item) => ({
+    market: toMarket(item.jys, item.dm),
+    code: item.dm,
+    name: item.mc,
+  }));
+  return { items, total: list.length };
+}
+
 async function snapshotSlice(
   offset: number,
   limit: number
@@ -296,6 +335,14 @@ async function snapshotSlice(
 }
 
 export const biyingMarketData: MarketData = {
+  async fetchListedSlice(offset, limit) {
+    return listedSlice(offset, limit);
+  },
+
+  async fetchOneSnapshot(item) {
+    return quoteOf({ dm: item.code, mc: item.name, jys: item.market });
+  },
+
   async fetchSnapshotSlice(offset, limit) {
     return snapshotSlice(offset, limit);
   },
