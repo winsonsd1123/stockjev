@@ -46,6 +46,7 @@ async function callOnce(
       "X-Title": "A-share Jev Observer",
     },
     body: JSON.stringify(jevRequest(state, questions)),
+    signal: AbortSignal.timeout(8000),
   });
 
   if (!res.ok) {
