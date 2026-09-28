@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { indexDailyStillFresh } from "@/lib/index-daily";
 import { chunk, nextBatch } from "@/lib/batch";
 import {
   avgAmountLastN,
@@ -306,6 +307,22 @@ describe("session", () => {
 
   it("formats shanghai ymd", () => {
     expect(shanghaiYmd(new Date("2026-09-24T02:00:00Z"))).toBe("2026-09-24");
+  });
+});
+
+describe("index daily cache", () => {
+  const morning = new Date("2026-09-24T02:00:00Z");
+  const evening = new Date("2026-09-24T09:00:00Z");
+
+  it("keeps yesterday before 16:00 and today after the bar exists", () => {
+    expect(indexDailyStillFresh("2026-09-23", new Date("2026-09-23T09:00:00Z"), morning)).toBe(true);
+    expect(indexDailyStillFresh("2026-09-24", new Date("2026-09-24T08:10:00Z"), evening)).toBe(true);
+  });
+
+  it("refetches after 16:00 until today's refresh has landed", () => {
+    expect(indexDailyStillFresh("2026-09-23", new Date("2026-09-23T09:00:00Z"), evening)).toBe(false);
+    expect(indexDailyStillFresh("2026-09-23", new Date("2026-09-24T02:00:00Z"), evening)).toBe(false);
+    expect(indexDailyStillFresh("2026-09-23", new Date("2026-09-24T08:10:00Z"), evening)).toBe(true);
   });
 });
 

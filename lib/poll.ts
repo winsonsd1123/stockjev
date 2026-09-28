@@ -1,3 +1,4 @@
+import { getIndexDaily } from "@/lib/index-daily";
 import { getMarketData, type KlineBar } from "@/lib/market-data";
 import {
   deriveDailyFeatures,
@@ -60,7 +61,13 @@ function asProgress(raw: unknown): PollProgress {
   return { ...emptyProgress(), ...(raw as PollProgress) };
 }
 
-export async function startPollRun(): Promise<
+export type PollTarget = {
+  market: Market;
+  code: string;
+  kind: "buy" | "sell";
+};
+
+export async function startPollRun(target?: PollTarget): Promise<
   | { skipped: true; reason: string }
   | { skipped: false; runId: number }
 > {
@@ -72,35 +79,79 @@ export async function startPollRun(): Promise<
   }
 
   const sb = getSupabase();
-  const [{ data: watch }, { data: holds }] = await Promise.all([
-    sb.from("watchlist").select("market,code,name,entry_price,added_at,score"),
-    sb
+  let queue: PollQueueItem[];
+  if (target?.kind === "buy") {
+    const { data, error } = await sb
+      .from("watchlist")
+      .select("market,code,name,entry_price,added_at,score")
+      .eq("market", target.market)
+      .eq("code", target.code)
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) return { skipped: true, reason: "观察池没有这只股票" };
+    queue = [
+      {
+        market: data.market as Market,
+        code: data.code as string,
+        name: data.name as string,
+        kind: "buy",
+        entryPrice: (data.entry_price as number | null) ?? null,
+        addedAt: (data.added_at as string | null) ?? null,
+        score: (data.score as number | null) ?? null,
+        quantity: null,
+      },
+    ];
+  } else if (target) {
+    const { data, error } = await sb
       .from("holdings")
-      .select("market,code,name,quantity,entry_price,added_at"),
-  ]);
-
-  const queue: PollQueueItem[] = [
-    ...(watch ?? []).map((w) => ({
-      market: w.market as Market,
-      code: w.code as string,
-      name: w.name as string,
-      kind: "buy" as const,
-      entryPrice: (w.entry_price as number | null) ?? null,
-      addedAt: (w.added_at as string | null) ?? null,
-      score: (w.score as number | null) ?? null,
-      quantity: null,
-    })),
-    ...(holds ?? []).map((h) => ({
-      market: h.market as Market,
-      code: h.code as string,
-      name: h.name as string,
-      kind: "sell" as const,
-      entryPrice: (h.entry_price as number | null) ?? null,
-      addedAt: (h.added_at as string | null) ?? null,
-      score: null,
-      quantity: (h.quantity as number | null) ?? null,
-    })),
-  ];
+      .select("market,code,name,entry_price,added_at,quantity")
+      .eq("market", target.market)
+      .eq("code", target.code)
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) return { skipped: true, reason: "持仓没有这只股票" };
+    queue = [
+      {
+        market: data.market as Market,
+        code: data.code as string,
+        name: data.name as string,
+        kind: "sell",
+        entryPrice: (data.entry_price as number | null) ?? null,
+        addedAt: (data.added_at as string | null) ?? null,
+        score: null,
+        quantity: (data.quantity as number | null) ?? null,
+      },
+    ];
+  } else {
+    const [{ data: watch }, { data: holds }] = await Promise.all([
+      sb.from("watchlist").select("market,code,name,entry_price,added_at,score"),
+      sb
+        .from("holdings")
+        .select("market,code,name,quantity,entry_price,added_at"),
+    ]);
+    queue = [
+      ...(watch ?? []).map((w) => ({
+        market: w.market as Market,
+        code: w.code as string,
+        name: w.name as string,
+        kind: "buy" as const,
+        entryPrice: (w.entry_price as number | null) ?? null,
+        addedAt: (w.added_at as string | null) ?? null,
+        score: (w.score as number | null) ?? null,
+        quantity: null,
+      })),
+      ...(holds ?? []).map((h) => ({
+        market: h.market as Market,
+        code: h.code as string,
+        name: h.name as string,
+        kind: "sell" as const,
+        entryPrice: (h.entry_price as number | null) ?? null,
+        addedAt: (h.added_at as string | null) ?? null,
+        score: null,
+        quantity: (h.quantity as number | null) ?? null,
+      })),
+    ];
+  }
 
   if (queue.length === 0) {
     console.log("[poll] skip 池为空");
@@ -235,7 +286,7 @@ async function stepPollBody(runId?: number): Promise<StepResult> {
   const events: StepEvent[] = [];
 
   if (progress.phase === "context" || !progress.context?.indexDaily) {
-    const indexDaily = await getMarketData().fetchIndexDaily(120);
+    const indexDaily = await getIndexDaily();
     progress.context = { indexDaily };
     progress.phase = "items";
     await saveProgress(run.id as number, progress);

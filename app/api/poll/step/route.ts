@@ -16,7 +16,12 @@ export async function POST(req: Request) {
     );
     return NextResponse.json(result);
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "poll step error";
+    const msg =
+      e instanceof Error
+        ? e.message
+        : e && typeof e === "object" && "message" in e && typeof e.message === "string"
+          ? e.message
+          : "poll step error";
     return NextResponse.json({ error: msg }, { status: 500 });
   }
 }

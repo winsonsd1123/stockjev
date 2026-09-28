@@ -8,7 +8,7 @@
 
 - **发现**：点击后抓取必盈全市场列表与快照，粗筛掉 ST / \*ST、上市不足 60 天、近 5 日日均成交额低于 5000 万元的股票，再对候选股按日 K 特征打优秀度分。本轮排序后给出建议。无星系统池最多 10 只：均线连续两次走坏才移出，空位只补给连续两轮都进建议、且仍为多头并未封顶的票。全程约 5–15 分钟，页面需保持打开。
 - **标星**：建议行上「标星」或手动输入代码会立刻进入观察池，不占系统池名额，也不等第二轮。标星票趋势走坏只提示，删除要手动确认。取消标星时若系统池已满会被拒绝。
-- **趋势复盘**：点击后只分析观察池和持仓。用最近一根已完成日 K，加上日线 MACD、KDJ、BOLL，给出趋势分，以及观察池「可入/观望」、持仓「可卖/持有」。适合收盘后看，不用盯盘。页面需保持打开。
+- **趋势复盘**：点击后只分析观察池和持仓。用最近一根已完成日 K，加上日线 MACD、KDJ、BOLL，给出趋势分，以及观察池「可入/观望」、持仓「可卖/持有」。适合收盘后看，不用盯盘。页面需保持打开。观察池和持仓每一行的「趋势」只复盘这一只。上证日 K 存在 Supabase，发现和复盘共用，需要执行 `008_index_daily.sql`。
 - **持仓**：录入代码和数量。复盘与观察池同一次执行，但只对持仓问是否可卖。
 
 发现扫全市场、只做初筛。复盘不改观察池名额，也不覆盖发现写入的 AI 分。
@@ -53,8 +53,11 @@ npm run dev
 3. [`003_last_price.sql`](supabase/migrations/003_last_price.sql) — 现价列
 4. [`004_tags.sql`](supabase/migrations/004_tags.sql) — 规则标签列
 5. [`005_watch_pool.sql`](supabase/migrations/005_watch_pool.sql) — 标星、趋势连续次数；已有观察池全部标星
+6. [`006_jev_prompt.sql`](supabase/migrations/006_jev_prompt.sql) — 判断记录里的提问
+7. [`007_confidence.sql`](supabase/migrations/007_confidence.sql) — 观察池信心指数
+8. [`008_index_daily.sql`](supabase/migrations/008_index_daily.sql) — 上证日 K 缓存（发现和复盘共用）
 
-表：`watchlist`、`holdings`、`runs`、`judgments`。
+表：`watchlist`、`holdings`、`runs`、`judgments`、`index_daily`。
 
 ## 脚本
 

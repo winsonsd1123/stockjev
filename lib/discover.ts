@@ -16,6 +16,7 @@ import { buildExcellenceQuestion, parseNouls, parseScore } from "@/lib/jev";
 import { decide, jevRequest } from "@/lib/jev-client";
 import { limitPct, type Market } from "@/lib/market";
 import { discoverCap, reconcilePool, type PoolAlign } from "@/lib/rules";
+import { getIndexDaily } from "@/lib/index-daily";
 import { getSupabase } from "@/lib/supabase";
 
 export type Suggestion = {
@@ -609,7 +610,7 @@ function openResult(
 async function ensureIndex(progress: DiscoverProgress, until: number) {
   if (progress.indexBars || expired(until)) return;
   try {
-    progress.indexBars = await getMarketData().fetchDailyKlines("sh", "000001", 120);
+    progress.indexBars = await getIndexDaily();
   } catch {
     progress.indexBars = [];
   }

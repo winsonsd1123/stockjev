@@ -1,0 +1,10 @@
+---
+description: Git 提交信息规范
+globs:
+alwaysApply: true
+---
+# Git Commit 规则
+- 所有 git commit message 必须使用简体中文
+- 严格遵循 Conventional Commits：<type>(<scope>): <描述>
+- type 仅限：feat / fix / docs / style / refactor / perf / test / chore / ci / build
+- 主题行一行概括，不超过 60 字符，示例：feat(用户模块): 添加手机号登录

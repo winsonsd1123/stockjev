@@ -510,13 +510,21 @@ export default function HomePage() {
     }
   }, [busy, busyType]);
 
-  async function startPoll() {
+  async function startPoll(target?: {
+    market: string;
+    code: string;
+    kind: "buy" | "sell";
+  }) {
     if (busy || driving.current) return;
     setBusy(true);
     setBusyType("poll");
-    setTaskMessage("开始趋势复盘…");
+    setTaskMessage(target ? `复盘 ${target.code}…` : "开始趋势复盘…");
     try {
-      const res = await fetch("/api/poll", { method: "POST" });
+      const res = await fetch("/api/poll", {
+        method: "POST",
+        headers: target ? { "Content-Type": "application/json" } : undefined,
+        body: target ? JSON.stringify(target) : undefined,
+      });
       const json = await res.json();
       if (res.status === 409) {
         const s = await fetchStatus();
@@ -1054,17 +1062,33 @@ export default function HomePage() {
                               </button>
                             </span>
                           ) : (
-                            <button
-                              type="button"
-                              className="text-red-600 disabled:opacity-50"
-                              disabled={Boolean(pendingAction)}
-                              onClick={() => {
-                                setConfirmHoldId(null);
-                                setConfirmWatchId(row.id);
-                              }}
-                            >
-                              删除
-                            </button>
+                            <span className="inline-flex items-center gap-2">
+                              <button
+                                type="button"
+                                className="text-zinc-700 disabled:opacity-50"
+                                disabled={busy || Boolean(pendingAction)}
+                                onClick={() =>
+                                  void startPoll({
+                                    market: row.market,
+                                    code: row.code,
+                                    kind: "buy",
+                                  })
+                                }
+                              >
+                                趋势
+                              </button>
+                              <button
+                                type="button"
+                                className="text-red-600 disabled:opacity-50"
+                                disabled={Boolean(pendingAction)}
+                                onClick={() => {
+                                  setConfirmHoldId(null);
+                                  setConfirmWatchId(row.id);
+                                }}
+                              >
+                                删除
+                              </button>
+                            </span>
                           )}
                         </td>
                       </tr>
@@ -1214,17 +1238,33 @@ export default function HomePage() {
                               </button>
                             </span>
                           ) : (
-                            <button
-                              type="button"
-                              className="text-red-600 disabled:opacity-50"
-                              disabled={Boolean(pendingAction)}
-                              onClick={() => {
-                                setConfirmWatchId(null);
-                                setConfirmHoldId(row.id);
-                              }}
-                            >
-                              删除
-                            </button>
+                            <span className="inline-flex items-center gap-2">
+                              <button
+                                type="button"
+                                className="text-zinc-700 disabled:opacity-50"
+                                disabled={busy || Boolean(pendingAction)}
+                                onClick={() =>
+                                  void startPoll({
+                                    market: row.market,
+                                    code: row.code,
+                                    kind: "sell",
+                                  })
+                                }
+                              >
+                                趋势
+                              </button>
+                              <button
+                                type="button"
+                                className="text-red-600 disabled:opacity-50"
+                                disabled={Boolean(pendingAction)}
+                                onClick={() => {
+                                  setConfirmWatchId(null);
+                                  setConfirmHoldId(row.id);
+                                }}
+                              >
+                                删除
+                              </button>
+                            </span>
                           )}
                         </td>
                       </tr>
