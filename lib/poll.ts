@@ -39,7 +39,7 @@ export type PollProgress = {
   failedCodes: string[];
 };
 
-const BATCH_SIZE = 5;
+const BATCH_SIZE = 1;
 /** 趋势复盘期间必盈请求至少间隔 1 秒，避免 60 秒内把日 K 和三项指标一起打出去。 */
 const REVIEW_GAP_MS = 1000;
 

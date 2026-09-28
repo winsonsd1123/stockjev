@@ -71,7 +71,7 @@ npm run dev
 | `/api/discover` | POST | 创建发现任务 |
 | `/api/discover/step` | POST | 推进一批发现（每步用满约 40 秒，进度在这一步进行中更新） |
 | `/api/poll` | POST | 创建一轮趋势复盘 |
-| `/api/poll/step` | POST | 推进一批复盘（每批 5 只，先日 K 与指标，先观察池后持仓） |
+| `/api/poll/step` | POST | 推进一批复盘（每步 1 只，先日 K 与指标，先观察池后持仓） |
 | `/api/watchlist` | GET / POST / DELETE | 观察池 |
 | `/api/holdings` | GET / POST / DELETE | 持仓 |
 | `/api/status` | GET | 运行中任务、建议纳入、上次轮询时间、是否交易时段 |
