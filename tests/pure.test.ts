@@ -6,6 +6,7 @@ import {
   deriveDailyFeatures,
   deriveIntradayFeatures,
   derivePositionFeatures,
+  deriveTrendIndicators,
   filterCandidates,
   passesCoarseFilter,
   passesLiquidity5d,
@@ -512,6 +513,42 @@ describe("discover progress", () => {
     expect(legacyListCursor({ snapshotSource: null, snapshotPage: 1, pageCursor: 0 })).toBe(
       0
     );
+  });
+
+  it("reads macd crosses and boll position from the last bars", () => {
+    const golden = deriveTrendIndicators({
+      close: 12,
+      macd: [
+        { diff: 0.1, dea: 0.2, macd: -0.2 },
+        { diff: 0.3, dea: 0.2, macd: 0.2 },
+      ],
+      kdj: [
+        { k: 40, d: 50, j: 20 },
+        { k: 60, d: 50, j: 80 },
+      ],
+      boll: [{ upper: 14, mid: 12, lower: 10 }],
+    });
+    expect(golden.macdGoldenCross).toBe(true);
+    expect(golden.macdDeathCross).toBe(false);
+    expect(golden.macdHistPositive).toBe(true);
+    expect(golden.kdjGoldenCross).toBe(true);
+    expect(golden.bollPos).toBeCloseTo(0.5);
+    expect(golden.bollAboveUpper).toBe(false);
+    expect(golden.bollBelowLower).toBe(false);
+
+    const death = deriveTrendIndicators({
+      close: 9,
+      macd: [
+        { diff: 0.3, dea: 0.2, macd: 0.2 },
+        { diff: 0.1, dea: 0.2, macd: -0.2 },
+      ],
+      kdj: [],
+      boll: [{ upper: 14, mid: 12, lower: 10 }],
+    });
+    expect(death.macdDeathCross).toBe(true);
+    expect(death.macdGoldenCross).toBe(false);
+    expect(death.bollBelowLower).toBe(true);
+    expect(death.bollPos).toBeCloseTo(-0.25);
   });
 
   it("uses one counter sentence for the progress hint", () => {

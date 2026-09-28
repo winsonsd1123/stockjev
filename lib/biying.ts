@@ -270,6 +270,24 @@ async function historyBars(
   return parseBars(await biyingGet(host));
 }
 
+async function indicatorSeries(
+  kind: "macd" | "kdj" | "boll",
+  symbol: string,
+  lmt: number
+): Promise<Record<string, unknown>[]> {
+  const json = await biyingGet(
+    `https://api.biyingapi.com/hsstock/history/${kind}/${symbol}/d/f/${licence()}?lt=${lmt}`
+  );
+  if (!Array.isArray(json)) {
+    const message =
+      json && typeof json === "object" && "message" in json
+        ? String((json as { message?: unknown }).message ?? "")
+        : "";
+    throw new Error(message || `${kind} 指标为空`);
+  }
+  return json.filter((row): row is Record<string, unknown> => !!row && typeof row === "object");
+}
+
 async function loadBars(
   symbol: string,
   level: "d" | "5",
@@ -355,6 +373,37 @@ export const biyingMarketData: MarketData = {
 
   async fetchDailyKlines(market, code, lmt = 5) {
     return loadBars(`${code}.${suffix(market)}`, "d", "f", lmt);
+  },
+
+  async fetchDailyIndicators(market, code, lmt = 30) {
+    const symbol = `${code}.${suffix(market)}`;
+    const n = Math.max(2, lmt);
+    const [macd, kdj, boll] = await Promise.all([
+      indicatorSeries("macd", symbol, n),
+      indicatorSeries("kdj", symbol, n),
+      indicatorSeries("boll", symbol, n),
+    ]);
+    return {
+      macd: macd.map((row) => ({
+        diff: num(row.diff),
+        dea: num(row.dea),
+        macd: num(row.macd),
+      })),
+      kdj: kdj.map((row) => ({
+        k: num(row.k),
+        d: num(row.d),
+        j: num(row.j),
+      })),
+      boll: boll.map((row) => ({
+        upper: num(row.u),
+        mid: num(row.m),
+        lower: num(row.d),
+      })),
+    };
+  },
+
+  async fetchIndexDaily(lmt = 120) {
+    return loadBars("000001.SH", "d", null, lmt);
   },
 
   async fetchIntraday5m(market, code, now = new Date()) {

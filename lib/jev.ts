@@ -213,6 +213,55 @@ export function buildBuyQuestions() {
   };
 }
 
+export const TREND_CRITERIA = [
+  "0 数据缺失，或 maAlign=bear 且 macdDeathCross=true 且 bollBelowLower=true",
+  "1 趋势已坏：maAlign=bear 且 macdHistPositive=false 且 kdjDeathCross=true",
+  "2 偏空：maAlign=bear，或 macdDeathCross=true 且 bollPos<0.5",
+  "3 走弱未确认：macdHistPositive=false，均线尚未成空头",
+  "4 偏弱：maAlign=mixed，且 bollPos<0.4 或指标金叉与死叉不同向",
+  "5 中性：maAlign=mixed，MACD 与 KDJ 无明确金叉或死叉",
+  "6 略多：maAlign=bull 或 macdGoldenCross=true，但 KDJ 与 BOLL 未同时配合",
+  "7 较好：maAlign=bull 且 macdHistPositive=true，仅一项指标逆向",
+  "8 趋势健康：maAlign=bull，macdHistPositive=true，kdjOverbought=false，bollPos 在 0.4~0.85，rs60>0",
+  "9 三项同向：maAlign=bull，macdHistPositive=true，无 KDJ 死叉且未超买，bollPos>0.5，rs60>0，bias20<=0.12",
+] as const;
+
+export function buildTrendQuestions(kind: "buy" | "sell") {
+  const conclusion =
+    kind === "buy"
+      ? {
+          canAct: {
+            type: "noul" as const,
+            instructions:
+              "按已完成日 K 判断现在是否可以入场。这是趋势结论，不是盘中买点。涨跌幅是小数。",
+            criteria: {
+              true: "maAlign=bull 且 macdHistPositive=true 且 kdjOverbought=false 且 bollAboveUpper=false 且 bias20<=0.12 且 rs60>=0",
+              false: "均线非多头，或 MACD 柱为负，或 KDJ 超买，或收盘突破布林上轨，或乖离过大，或弱于大盘",
+            },
+          },
+        }
+      : {
+          canAct: {
+            type: "noul" as const,
+            instructions:
+              "按已完成日 K 判断持仓是否应该卖出。这是趋势结论，不是盘中卖点。涨跌幅是小数。",
+            criteria: {
+              true: "maAlign=bear 或 macdDeathCross=true 或 bollBelowLower=true 或（kdjOverbought=true 且 macdHistPositive=false）",
+              false: "均线未成空头，且未死叉、未跌破布林下轨，趋势结构还在",
+            },
+          },
+        };
+  return {
+    trend: {
+      type: "score" as const,
+      instructions:
+        "基于日线均线，以及 MACD、KDJ、BOLL 是否同向，判断趋势健康程度。布尔字段为 true/false，涨跌幅是小数。对照 criteria 从低到高选最贴合的一档。涨幅大不是加分。",
+      criteria: [...TREND_CRITERIA],
+    },
+    ...conclusion,
+  };
+}
+
 export function buildSellQuestions() {
   return {
     trendBroken: {

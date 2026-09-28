@@ -76,7 +76,6 @@ type Toast = {
 
 type ListsStatus = "loading" | "ready";
 
-const POLL_INTERVAL_MS = 15 * 60 * 1000;
 const HIGHLIGHT_MS = 1600;
 
 const PHASE_LABEL: Record<string, string> = {
@@ -84,8 +83,8 @@ const PHASE_LABEL: Record<string, string> = {
   snapshot: "抓取快照",
   score: "优秀度打分",
   commit: "生成建议",
-  context: "抓取大盘",
-  items: "盘中判定",
+  context: "抓取日K",
+  items: "趋势复盘",
   done: "已完成",
 };
 
@@ -320,7 +319,7 @@ export default function HomePage() {
         let lastMessage = "";
         while (!done) {
           setTaskMessage(
-            type === "discover" ? "正在推进发现…" : "正在推进盘中判定…"
+            type === "discover" ? "正在推进发现…" : "正在推进趋势复盘…"
           );
           let statusTimer: ReturnType<typeof setInterval> | null = null;
           if (type === "discover") {
@@ -423,8 +422,8 @@ export default function HomePage() {
           setTaskMessage(doneText);
           showToast("ok", doneText);
         } else {
-          setTaskMessage("盘中判定完成");
-          showToast("ok", "盘中判定完成");
+          setTaskMessage("趋势复盘完成");
+          showToast("ok", "趋势复盘完成");
         }
         await refreshLists({ highlight: type === "poll" });
         await fetchStatus();
@@ -441,44 +440,6 @@ export default function HomePage() {
     [fetchStatus, refreshLists, showToast]
   );
 
-  const maybeStartPoll = useCallback(
-    async (s: Status) => {
-      if (s.running || driving.current) return;
-      if (!s.tradingSession) return;
-      const last = s.lastPollAt ? new Date(s.lastPollAt).getTime() : 0;
-      if (Date.now() - last < POLL_INTERVAL_MS) return;
-      const res = await fetch("/api/poll", { method: "POST" });
-      const json = await res.json();
-      if (!res.ok) {
-        if (res.status !== 409) {
-          const msg = json.error ?? "轮询启动失败";
-          setTaskMessage(msg);
-          showToast("fail", msg);
-        }
-        return;
-      }
-      if (json.skipped) {
-        setTaskMessage(json.reason ?? "已跳过轮询");
-        return;
-      }
-      setPollLog((prev) => [
-        ...prev,
-        {
-          level: "info",
-          text: `开始盘中判定 ${new Date().toLocaleTimeString("zh-CN")}`,
-        },
-      ]);
-      setPollProgress({
-        processed: 0,
-        total: 0,
-        label: "盘中判定",
-        phase: "context",
-      });
-      await driveSteps("poll", json.runId);
-    },
-    [driveSteps, showToast]
-  );
-
   useEffect(() => {
     if (bootstrapped.current) return;
     bootstrapped.current = true;
@@ -486,31 +447,28 @@ export default function HomePage() {
       try {
         await refreshLists();
         const s = await fetchStatus();
-        if (s.running) {
-          const phase = s.running.progress?.phase ?? "";
-          const next: RunProgress = {
-            processed:
-              s.running.progress?.processed ??
-              s.running.progress?.scored ??
-              0,
-            total: s.running.progress?.total ?? 0,
-            phase,
-            label:
-              s.running.type === "discover"
-                ? (s.running.progress?.message ?? PHASE_LABEL[phase] ?? s.running.type)
-                : (PHASE_LABEL[phase] ?? s.running.type),
-          };
-          if (s.running.type === "discover") {
-            setDiscoverProgress(next);
-            setDiscoverLog([{ level: "info", text: "继续未完成的发现" }]);
-          } else {
-            setPollProgress(next);
-            setPollLog([{ level: "info", text: "继续未完成的盘中判定" }]);
-          }
-          await driveSteps(s.running.type, s.running.id);
+        if (!s.running) return;
+        const phase = s.running.progress?.phase ?? "";
+        const next: RunProgress = {
+          processed:
+            s.running.progress?.processed ??
+            s.running.progress?.scored ??
+            0,
+          total: s.running.progress?.total ?? 0,
+          phase,
+          label:
+            s.running.type === "discover"
+              ? (s.running.progress?.message ?? PHASE_LABEL[phase] ?? s.running.type)
+              : (PHASE_LABEL[phase] ?? s.running.type),
+        };
+        if (s.running.type === "discover") {
+          setDiscoverProgress(next);
+          setDiscoverLog([{ level: "info", text: "继续未完成的发现" }]);
         } else {
-          await maybeStartPoll(s);
+          setPollProgress(next);
+          setPollLog([{ level: "info", text: "继续未完成的趋势复盘" }]);
         }
+        await driveSteps(s.running.type, s.running.id);
       } catch (e) {
         const msg = e instanceof Error ? e.message : "初始化失败";
         setTaskMessage(msg);
@@ -519,20 +477,10 @@ export default function HomePage() {
       }
     })();
 
-    const timer = setInterval(async () => {
-      try {
-        const s = await fetchStatus();
-        await maybeStartPoll(s);
-      } catch {
-        /* ignore */
-      }
-    }, POLL_INTERVAL_MS);
-
     return () => {
-      clearInterval(timer);
       if (toastTimer.current) clearTimeout(toastTimer.current);
     };
-  }, [driveSteps, fetchStatus, maybeStartPoll, refreshLists, showToast]);
+  }, [driveSteps, fetchStatus, refreshLists, showToast]);
 
   useEffect(() => {
     discoverLogRef.current?.scrollTo({
@@ -561,6 +509,67 @@ export default function HomePage() {
       pollLogUserClosed.current = false;
     }
   }, [busy, busyType]);
+
+  async function startPoll() {
+    if (busy || driving.current) return;
+    setBusy(true);
+    setBusyType("poll");
+    setTaskMessage("开始趋势复盘…");
+    try {
+      const res = await fetch("/api/poll", { method: "POST" });
+      const json = await res.json();
+      if (res.status === 409) {
+        const s = await fetchStatus();
+        if (s.running?.type === "poll") {
+          const phase = s.running.progress?.phase ?? "context";
+          setPollProgress({
+            processed: s.running.progress?.processed ?? 0,
+            total: s.running.progress?.total ?? 0,
+            phase,
+            label: PHASE_LABEL[phase] ?? "趋势复盘",
+          });
+          setPollLog([{ level: "info", text: "继续未完成的趋势复盘" }]);
+          await driveSteps("poll", s.running.id);
+          return;
+        }
+      }
+      if (!res.ok) {
+        const msg = json.error ?? "复盘启动失败";
+        setTaskMessage(msg);
+        showToast("fail", msg);
+        setBusy(false);
+        setBusyType(null);
+        return;
+      }
+      if (json.skipped) {
+        const msg = json.reason ?? "已跳过复盘";
+        setTaskMessage(msg);
+        showToast("fail", msg);
+        setBusy(false);
+        setBusyType(null);
+        return;
+      }
+      setPollLog([
+        {
+          level: "info",
+          text: `开始趋势复盘 ${new Date().toLocaleTimeString("zh-CN")}`,
+        },
+      ]);
+      setPollProgress({
+        processed: 0,
+        total: 0,
+        label: "趋势复盘",
+        phase: "context",
+      });
+      await driveSteps("poll", json.runId);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "复盘启动失败";
+      setTaskMessage(msg);
+      showToast("fail", msg);
+      setBusy(false);
+      setBusyType(null);
+    }
+  }
 
   async function startDiscover() {
     setConfirmDiscover(false);
@@ -784,7 +793,7 @@ export default function HomePage() {
       : activeTab === "discover" && pollBusy
         ? {
             tab: "watch" as const,
-            text: `盘中判定 ${pollProgress.processed}/${pollProgress.total || "—"} · ${pollProgress.label || taskMessage || "进行中"}`,
+            text: `趋势复盘 ${pollProgress.processed}/${pollProgress.total || "—"} · ${pollProgress.label || taskMessage || "进行中"}`,
           }
         : null;
 
@@ -860,7 +869,7 @@ export default function HomePage() {
           <p className="text-sm text-zinc-500">
             交易时段：{status?.tradingSession ? "是" : "否"}
             {" · "}
-            上次轮询：{fmtTime(status?.lastPollAt)}
+            上次复盘：{fmtTime(status?.lastPollAt)}
             {taskMessage && !crossBanner ? ` · ${taskMessage}` : ""}
           </p>
           {crossBanner ? (
@@ -885,23 +894,35 @@ export default function HomePage() {
       {activeTab === "watch" && (
         <div role="tabpanel" className="flex flex-col gap-4">
           <section className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
-            <h2 className="mb-1 text-lg font-medium">盘中判定</h2>
-            <p className="mb-2 text-xs text-zinc-500">
-              交易日 9:30–15:00，页面打开时每 15 分钟自动判定观察池买入 / 持仓卖出
-              {pollBusy && taskMessage ? ` · ${taskMessage}` : ""}
+            <h2 className="mb-1 text-lg font-medium">趋势复盘</h2>
+            <p className="mb-3 text-xs text-zinc-500">
+              收盘后用最近一根已完成日 K，对观察池判断可入、对持仓判断可卖。不用盯盘。
             </p>
-            {(pollBusy ||
-              pollProgress.total > 0 ||
-              pollProgress.processed > 0) && (
-              <div className="mb-2">
+            <div className="flex flex-wrap items-end gap-3">
+              <button
+                type="button"
+                onClick={() => void startPoll()}
+                disabled={busy}
+                title={
+                  discoverBusy ? "发现进行中，结束后可开始趋势复盘" : undefined
+                }
+                className="rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
+              >
+                {pollBusy ? "复盘中…" : discoverBusy ? "发现中" : "趋势复盘"}
+              </button>
+              <div className="min-w-[200px] flex-1">
                 <div className="mb-1 flex justify-between text-xs text-zinc-500">
-                  <span>{pollProgress.label || "盘中判定"}</span>
+                  <span>
+                    {pollBusy
+                      ? taskMessage || pollProgress.label || "正在推进趋势复盘…"
+                      : pollProgress.label || "复盘进度"}
+                  </span>
                   <span>
                     {pollProgress.processed}/{pollProgress.total || "—"} (
                     {pollBar}%)
                   </span>
                 </div>
-                <div className="h-1.5 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
+                <div className="h-2 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
                   <div
                     className={`h-full bg-sky-500 transition-all ${
                       pollBusy && pollProgress.total === 0
@@ -914,7 +935,7 @@ export default function HomePage() {
                   />
                 </div>
               </div>
-            )}
+            </div>
             {(pollBusy || pollLog.length > 0) &&
               logToggle(pollLogOpen, pollLog.length, setPollLogOpen, () => {
                 pollLogUserClosed.current = true;
@@ -925,7 +946,7 @@ export default function HomePage() {
                 className="mt-2 max-h-28 overflow-y-auto rounded-lg bg-zinc-50 px-3 py-2 font-mono text-xs leading-5 text-zinc-600 dark:bg-zinc-900 dark:text-zinc-300"
               >
                 {pollLog.length === 0 ? (
-                  <div className="text-zinc-400">等待盘中判定本步返回…</div>
+                  <div className="text-zinc-400">等待趋势复盘本步返回…</div>
                 ) : (
                   pollLog.map((line, i) => (
                     <div
@@ -959,7 +980,7 @@ export default function HomePage() {
                     <th className="py-2 pr-2">现价</th>
                     <th className="py-2 pr-2">AI分</th>
                     <th className="py-2 pr-2">信心</th>
-                    <th className="py-2 pr-2">买入概率</th>
+                    <th className="py-2 pr-2">可入</th>
                     <th className="py-2 pr-2">标记</th>
                     <th className="py-2 pr-2">更新时间</th>
                     <th className="py-2">操作</th>
@@ -1141,7 +1162,7 @@ export default function HomePage() {
                     <th className="py-2 pr-2">数量</th>
                     <th className="py-2 pr-2">入池价</th>
                     <th className="py-2 pr-2">现价</th>
-                    <th className="py-2 pr-2">卖出概率</th>
+                    <th className="py-2 pr-2">可卖</th>
                     <th className="py-2 pr-2">标记</th>
                     <th className="py-2 pr-2">更新时间</th>
                     <th className="py-2">操作</th>
@@ -1234,14 +1255,14 @@ export default function HomePage() {
                 onClick={() => setConfirmDiscover(true)}
                 disabled={busy}
                 title={
-                  pollBusy ? "盘中判定进行中，结束后可开始发现" : undefined
+                  pollBusy ? "趋势复盘进行中，结束后可开始发现" : undefined
                 }
                 className="rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
               >
                 {discoverBusy
                   ? "运行中…"
                   : pollBusy
-                    ? "盘中判定中"
+                    ? "趋势复盘中"
                     : "发现"}
               </button>
               <div className="min-w-[200px] flex-1">
