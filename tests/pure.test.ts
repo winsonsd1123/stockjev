@@ -26,6 +26,7 @@ import { codeToMarket, limitPct, limitPrices, normalizeCode, toSecid } from "@/l
 import { buyGate, discoverCap, reconcilePool, sellGate } from "@/lib/rules";
 import { discoverBarCounts, discoverProgressMessage, legacyListCursor } from "@/lib/discover";
 import { isTradingSession, shanghaiYmd } from "@/lib/session";
+import { passwordMatches, sessionMatches, sessionToken } from "@/lib/site-auth";
 
 describe("market", () => {
   it("maps prefixes", () => {
@@ -578,5 +579,31 @@ describe("discover progress", () => {
         skipped: 820,
       })
     ).toBe("已扫 860/5120 · 待打分 12 · 累计打分 40 · 跳过 820");
+  });
+});
+
+describe("site auth", () => {
+  const secret = "gate-secret";
+
+  it("accepts the hmac of the same password", () => {
+    const token = sessionToken(secret);
+    expect(token).toBeTruthy();
+    expect(sessionToken(secret)).toBe(token);
+    expect(sessionMatches(token ?? undefined, secret)).toBe(true);
+    expect(passwordMatches(secret, secret)).toBe(true);
+  });
+
+  it("rejects a different password", () => {
+    const other = sessionToken("other-secret");
+    expect(sessionMatches(other ?? undefined, secret)).toBe(false);
+    expect(passwordMatches("other-secret", secret)).toBe(false);
+    expect(sessionMatches("short", secret)).toBe(false);
+  });
+
+  it("rejects an empty password", () => {
+    expect(sessionToken("")).toBeNull();
+    expect(sessionMatches(sessionToken(secret) ?? undefined, "")).toBe(false);
+    expect(passwordMatches("", secret)).toBe(false);
+    expect(passwordMatches(secret, "")).toBe(false);
   });
 });

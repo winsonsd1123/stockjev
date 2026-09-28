@@ -790,6 +790,11 @@ export default function HomePage() {
   const rowHighlight =
     "bg-emerald-50 transition-colors duration-500 dark:bg-emerald-950/40";
 
+  async function logout() {
+    await fetch("/api/auth", { method: "DELETE" });
+    window.location.href = "/login";
+  }
+
   const crossBanner =
     activeTab === "watch" && discoverBusy
       ? {
@@ -871,9 +876,18 @@ export default function HomePage() {
 
       <header className="sticky top-0 z-40 -mx-4 space-y-2 border-b border-zinc-200 bg-zinc-50/95 px-4 py-3 backdrop-blur dark:border-zinc-800 dark:bg-black/95">
         <div className="mx-auto max-w-6xl">
-          <h1 className="text-2xl font-semibold tracking-tight">
-            A股 Jev 观察助手
-          </h1>
+          <div className="flex items-center justify-between gap-3">
+            <h1 className="text-2xl font-semibold tracking-tight">
+              A股 Jev 观察助手
+            </h1>
+            <button
+              type="button"
+              onClick={() => void logout()}
+              className="shrink-0 rounded-lg border border-zinc-300 px-3 py-1.5 text-sm text-zinc-600 hover:bg-white dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-900"
+            >
+              退出
+            </button>
+          </div>
           <p className="text-sm text-zinc-500">
             交易时段：{status?.tradingSession ? "是" : "否"}
             {" · "}

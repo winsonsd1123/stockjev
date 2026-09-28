@@ -2,7 +2,7 @@
 
 个人自用的 A 股观察工具。用 OpenRouter 上的 Jev 模型对全市场做优秀度初筛，再对观察池和持仓做日线趋势复盘，给出可入或可卖。结果只在网页上展示，不自动交易，也不承诺收益。
 
-单用户，无登录。
+单用户。整站一个口令，没有账号体系。未登录进不了页面，也调不了接口。
 
 ## 功能
 
@@ -43,8 +43,9 @@ npm run dev
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `biying_api_key`
+- `SITE_PASSWORD` — 整站口令。页面和 `/api/*` 都要先通过。Vercel 环境变量里也要配同一项，漏配时登录会被拒绝。
 
-密钥只放在本地，不要提交仓库。
+密钥只放在本地，不要提交仓库。改完 `.env.local` 后重启 `npm run dev`。
 
 在 Supabase 中按序执行迁移：
 

@@ -1,7 +1,7 @@
 # A股 Jev 观察助手 — PRD
 
 > 版本：v1.0 ｜ 日期：2026-09-24 ｜ 状态：已确认
-> 定位：个人自用的 A 股 AI 辅助观察工具，最简方案，单用户，无登录。
+> 定位：个人自用的 A 股 AI 辅助观察工具，最简方案，单用户，整站口令，无账号。
 
 ## 1. 概述
 
@@ -19,7 +19,7 @@
 | 行情数据 | 东方财富公开接口 | 无需 key：全市场快照（排行分页）/ 日K线 / 分钟K线 / 指数K线 |
 | 部署 | Vercel Hobby | 硬约束：单请求 ≤60s、Cron 仅每天级精度 → 一切长任务由**前端驱动分批**完成，不用服务端定时 |
 
-环境变量：`OPENROUTER_API_KEY`、`SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`（仅服务端使用）。
+环境变量：`OPENROUTER_API_KEY`、`SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、`SITE_PASSWORD`（仅服务端使用）。`SITE_PASSWORD` 是整站口令，cookie 只存 HMAC。
 
 ### Jev 模型要点（影响产品设计）
 
