@@ -1,3 +1,5 @@
+import type { BollPoint, KdjPoint, MacdPoint } from "@/lib/market-data";
+
 export type SnapshotLike = {
   name: string;
   /** 成交额（元）——快照仅供参考，流动性改看近5日均额 */
@@ -568,5 +570,70 @@ export function derivePositionFeatures(input: {
     giveBackRatio,
     belowMA20: ma20 != null && price > 0 && price < ma20,
     belowAtrStop,
+  };
+}
+
+export type TrendIndicators = {
+  macdGoldenCross: boolean;
+  macdDeathCross: boolean;
+  macdHistPositive: boolean;
+  kdjK: number | null;
+  kdjD: number | null;
+  kdjJ: number | null;
+  kdjOverbought: boolean;
+  kdjOversold: boolean;
+  kdjGoldenCross: boolean;
+  kdjDeathCross: boolean;
+  bollPos: number | null;
+  bollAboveUpper: boolean;
+  bollBelowLower: boolean;
+};
+
+function crossedUp(prevA: number, prevB: number, lastA: number, lastB: number): boolean {
+  return prevA <= prevB && lastA > lastB;
+}
+
+function crossedDown(prevA: number, prevB: number, lastA: number, lastB: number): boolean {
+  return prevA >= prevB && lastA < lastB;
+}
+
+/** 只用最近两根日线指标，供趋势复盘交给 Jev。 */
+export function deriveTrendIndicators(input: {
+  close: number;
+  macd: MacdPoint[];
+  kdj: KdjPoint[];
+  boll: BollPoint[];
+}): TrendIndicators {
+  const macdPrev = input.macd.length >= 2 ? input.macd[input.macd.length - 2] : null;
+  const macdLast = input.macd.at(-1) ?? null;
+  const kdjPrev = input.kdj.length >= 2 ? input.kdj[input.kdj.length - 2] : null;
+  const kdjLast = input.kdj.at(-1) ?? null;
+  const boll = input.boll.at(-1) ?? null;
+  const span = boll ? boll.upper - boll.lower : 0;
+  const bollPos =
+    boll && span > 0 ? (input.close - boll.lower) / span : null;
+
+  return {
+    macdGoldenCross: macdPrev != null && macdLast != null
+      ? crossedUp(macdPrev.diff, macdPrev.dea, macdLast.diff, macdLast.dea)
+      : false,
+    macdDeathCross: macdPrev != null && macdLast != null
+      ? crossedDown(macdPrev.diff, macdPrev.dea, macdLast.diff, macdLast.dea)
+      : false,
+    macdHistPositive: macdLast != null ? macdLast.macd > 0 : false,
+    kdjK: kdjLast?.k ?? null,
+    kdjD: kdjLast?.d ?? null,
+    kdjJ: kdjLast?.j ?? null,
+    kdjOverbought: kdjLast != null && (kdjLast.j > 100 || kdjLast.k > 80),
+    kdjOversold: kdjLast != null && (kdjLast.j < 0 || kdjLast.k < 20),
+    kdjGoldenCross: kdjPrev != null && kdjLast != null
+      ? crossedUp(kdjPrev.k, kdjPrev.d, kdjLast.k, kdjLast.d)
+      : false,
+    kdjDeathCross: kdjPrev != null && kdjLast != null
+      ? crossedDown(kdjPrev.k, kdjPrev.d, kdjLast.k, kdjLast.d)
+      : false,
+    bollPos,
+    bollAboveUpper: boll != null && input.close > boll.upper,
+    bollBelowLower: boll != null && input.close < boll.lower,
   };
 }

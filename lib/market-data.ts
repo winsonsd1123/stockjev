@@ -67,6 +67,16 @@ export type IndexContext = {
   daily5: KlineBar[];
 };
 
+export type MacdPoint = { diff: number; dea: number; macd: number };
+export type KdjPoint = { k: number; d: number; j: number };
+export type BollPoint = { upper: number; mid: number; lower: number };
+
+export type DailyIndicators = {
+  macd: MacdPoint[];
+  kdj: KdjPoint[];
+  boll: BollPoint[];
+};
+
 export type ResolvedStock = {
   market: Market;
   code: string;
@@ -81,9 +91,12 @@ export type MarketData = {
   fetchSnapshotSlice(offset: number, limit: number): Promise<SnapshotPage>;
   fetchSnapshotPage(page: number, pageSize?: number): Promise<SnapshotPage>;
   fetchDailyKlines(market: Market, code: string, lmt?: number): Promise<KlineBar[]>;
+  fetchDailyIndicators(market: Market, code: string, lmt?: number): Promise<DailyIndicators>;
+  fetchIndexDaily(lmt?: number): Promise<KlineBar[]>;
   fetchIntraday5m(market: Market, code: string, now?: Date): Promise<KlineBar[]>;
   fetchIndexContext(now?: Date): Promise<IndexContext>;
   isShanghaiTradingDay(now?: Date): Promise<boolean>;
+  setMinGap(ms: number): void;
   fetchQuotes(items: { market: Market; code: string }[]): Promise<QuoteLite[]>;
   resolveStock(code: string): Promise<ResolvedStock>;
 };

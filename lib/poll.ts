@@ -1,26 +1,13 @@
 import { getMarketData, type KlineBar } from "@/lib/market-data";
 import {
   deriveDailyFeatures,
-  deriveIntradayFeatures,
-  derivePositionFeatures,
-  priorAvgVolume,
-  priorHigh,
+  deriveTrendIndicators,
   type DailyFeatures,
-  type IntradayFeatures,
-  type PositionFeatures,
+  type TrendIndicators,
 } from "@/lib/filter";
-import {
-  buildBuyQuestions,
-  buildIndexQuestion,
-  buildSellQuestions,
-  composeBuy,
-  composeSell,
-  parseNouls,
-} from "@/lib/jev";
+import { buildTrendQuestions, parseNoul, parseScore, scoreIndexToDisplay } from "@/lib/jev";
 import { decide, jevRequest, type JevPrompt } from "@/lib/jev-client";
 import { limitPct, type Market } from "@/lib/market";
-import { applyCap, buyGate, sellGate } from "@/lib/rules";
-import { isLateSession, isTradingSession, sessionProgress } from "@/lib/session";
 import {
   anyRunningRun,
   getRunningRun,
@@ -43,11 +30,7 @@ export type PollQueueItem = {
 export type PollProgress = {
   phase: "context" | "items" | "done";
   context: {
-    indexIntraday5m: KlineBar[];
     indexDaily: KlineBar[];
-    indexIntradayRet: number | null;
-    indexRet5: number | null;
-    indexOk: number;
   } | null;
   queue: PollQueueItem[];
   cursor: number;
@@ -57,6 +40,8 @@ export type PollProgress = {
 };
 
 const BATCH_SIZE = 5;
+/** 趋势复盘期间必盈请求至少间隔 1 秒，避免 60 秒内把日 K 和三项指标一起打出去。 */
+const REVIEW_GAP_MS = 1000;
 
 function emptyProgress(): PollProgress {
   return {
@@ -79,12 +64,6 @@ export async function startPollRun(): Promise<
   | { skipped: true; reason: string }
   | { skipped: false; runId: number }
 > {
-  const tradingDay = await getMarketData().isShanghaiTradingDay();
-  if (!isTradingSession(tradingDay)) {
-    console.log("[poll] skip 非交易时段");
-    return { skipped: true, reason: "非交易时段" };
-  }
-
   const existing = await anyRunningRun();
   if (existing) {
     const err = new Error("已有任务在运行") as Error & { status: number };
@@ -180,197 +159,61 @@ function roundFeatureMap(
   return out;
 }
 
-function indexIntradayReturn(
-  intraday: KlineBar[],
-  daily: KlineBar[]
-): number | null {
-  if (intraday.length === 0 || daily.length < 2) return null;
-  const prev = daily[daily.length - 2].close;
-  const last = intraday[intraday.length - 1].close;
-  if (!(prev > 0) || !(last > 0)) return null;
-  return last / prev - 1;
+function trendFeatures(daily: DailyFeatures, trend: TrendIndicators) {
+  return roundFeatureMap({
+    maAlign: daily.maAlign,
+    ret20: daily.ret20,
+    bias20: daily.bias20,
+    ddFromHigh60: daily.ddFromHigh60,
+    rs60: daily.rs60,
+    ...trend,
+  });
 }
 
-function ret5Of(daily: KlineBar[]): number | null {
-  if (daily.length < 6) return null;
-  const prev = daily[daily.length - 6].close;
-  const last = daily[daily.length - 1].close;
-  if (!(prev > 0)) return null;
-  return last / prev - 1;
-}
-
-async function judgeIndex(ctx: {
-  intraday5m: KlineBar[];
-  daily: KlineBar[];
-  intradayRet: number | null;
-  ret5: number | null;
-}): Promise<number> {
-  let amount = 0;
-  let vol = 0;
-  for (const b of ctx.intraday5m) {
-    if (b.amount > 0 && b.volume > 0) {
-      amount += b.amount;
-      vol += b.volume;
-    }
-  }
-  const vwap = vol > 0 ? amount / (vol * 100) : null;
-  const price = ctx.intraday5m.at(-1)?.close ?? null;
-  try {
-    const resp = await decide(
-      {
-        index: {
-          intradayRet: ctx.intradayRet,
-          ret5: ctx.ret5,
-          price,
-          vwap,
-        },
-      },
-      buildIndexQuestion()
-    );
-    return parseNouls(resp, ["indexOk"]).indexOk;
-  } catch {
-    return 0.5;
-  }
-}
-
-async function judgeBuy(input: {
-  item: PollQueueItem;
+async function judgeTrend(input: {
+  kind: "buy" | "sell";
   daily: DailyFeatures;
-  intra: IntradayFeatures;
-  position: PositionFeatures;
-  indexOk: number;
-  indexRet5: number | null;
-  price: number;
-  vwap: number | null;
+  trend: TrendIndicators;
 }): Promise<{
   probability: number;
-  tag: string | null;
+  trendScore: number;
+  tag: string;
   parts: Record<string, number>;
   prompt: JevPrompt | null;
 }> {
-  const gate = buyGate({
-    isLimitUp: input.intra.isLimitUp,
-    isOneWordBoard: input.intra.isOneWordBoard,
-    isLimitDown: input.intra.isLimitDown,
-    barsCount: input.intra.barsCount,
-    afterCloseAuction: isLateSession(),
-    ret20: input.daily.ret20,
-    pos20: input.daily.pos20,
-    limitUpCount20: input.daily.limitUpCount20,
-    changePct: input.intra.changePct,
-    wideLimit: limitPct(input.item.market, input.item.code) >= 0.2,
-  });
-  if (gate.action === "skip") {
-    const err = new Error(gate.tag ?? "跳过") as Error & { skip: boolean };
-    err.skip = true;
-    throw err;
-  }
-  if (gate.action === "force") {
-    return {
-      probability: gate.probability ?? 0,
-      tag: gate.tag ?? null,
-      parts: {},
-      prompt: null,
-    };
-  }
-  const features = roundFeatureMap({
-    ...input.daily,
-    ...input.intra,
-    price: input.price,
-    vwap: input.vwap,
-    sinceEntryPct: input.position.pnlPct,
-    daysSinceAdded: input.position.holdingDays,
-    discoverScore: input.item.score,
-    rs5:
-      input.daily.ret5 != null && input.indexRet5 != null
-        ? Math.round((input.daily.ret5 - input.indexRet5) * 10000) / 10000
-        : null,
-  });
-  const questions = buildBuyQuestions();
+  const features = trendFeatures(input.daily, input.trend);
+  const questions = buildTrendQuestions(input.kind);
   const prompt = jevRequest({ features }, questions);
   const resp = await decide({ features }, questions);
-  const raw = parseNouls(resp, [
-    "chaseRisk",
-    "strongerThanIndex",
-    "validBreakout",
-    "pullbackEntry",
-  ]);
-  const probability = applyCap(
-    composeBuy(
-      {
-        chaseRisk: raw.chaseRisk,
-        strongerThanIndex: raw.strongerThanIndex,
-        validBreakout: raw.validBreakout,
-        pullbackEntry: raw.pullbackEntry,
-      },
-      input.indexOk
-    ),
-    gate.cap
-  );
-  return { probability, tag: gate.tag ?? null, parts: raw, prompt };
-}
-
-async function judgeSell(input: {
-  item: PollQueueItem;
-  daily: DailyFeatures;
-  intra: IntradayFeatures;
-  position: PositionFeatures;
-  price: number;
-  vwap: number | null;
-}): Promise<{
-  probability: number;
-  tag: string | null;
-  parts: Record<string, number>;
-  prompt: JevPrompt | null;
-}> {
-  const gate = sellGate({
-    isLimitUp: input.intra.isLimitUp,
-    isLimitDown: input.intra.isLimitDown,
-    boughtToday: input.position.boughtToday,
-    afterCloseAuction: isLateSession(),
-    barsCount: input.intra.barsCount,
-    pnlPct: input.position.pnlPct,
-    belowAtrStop: input.position.belowAtrStop,
-  });
-  if (gate.action === "skip") {
-    const err = new Error(gate.tag ?? "跳过") as Error & { skip: boolean };
-    err.skip = true;
-    throw err;
-  }
-  if (gate.action === "force") {
-    return {
-      probability: gate.probability ?? 0,
-      tag: gate.tag ?? null,
-      parts: {},
-      prompt: null,
-    };
-  }
-  const features = roundFeatureMap({
-    ...input.daily,
-    ...input.intra,
-    ...input.position,
-    price: input.price,
-    vwap: input.vwap,
-    quantity: input.item.quantity,
-  });
-  const questions = buildSellQuestions();
-  const prompt = jevRequest({ features }, questions);
-  const resp = await decide({ features }, questions);
-  const raw = parseNouls(resp, ["trendBroken", "takeProfit", "dipIsMarketDriven"]);
-  let cap = gate.cap;
-  if (input.intra.isLimitUp && raw.takeProfit >= 0.5) cap = undefined;
-  const probability = applyCap(
-    composeSell({
-      trendBroken: raw.trendBroken,
-      takeProfit: raw.takeProfit,
-      dipIsMarketDriven: raw.dipIsMarketDriven,
-    }),
-    cap
-  );
-  return { probability, tag: gate.tag ?? null, parts: raw, prompt };
+  const scored = parseScore(resp, "trend");
+  const canAct = parseNoul(resp, "canAct").probability;
+  const conclusion =
+    input.kind === "buy"
+      ? canAct >= 0.5
+        ? "可入"
+        : "观望"
+      : canAct >= 0.5
+        ? "可卖"
+        : "持有";
+  return {
+    probability: canAct,
+    trendScore: scored.displayScore,
+    tag: `${scored.displayScore} · ${conclusion}`,
+    parts: { trend: scored.probability, canAct },
+    prompt,
+  };
 }
 
 export async function stepPoll(runId?: number): Promise<StepResult> {
+  getMarketData().setMinGap(REVIEW_GAP_MS);
+  try {
+    return await stepPollBody(runId);
+  } finally {
+    getMarketData().setMinGap(0);
+  }
+}
+
+async function stepPollBody(runId?: number): Promise<StepResult> {
   const sb = getSupabase();
   let run;
   if (runId != null) {
@@ -391,37 +234,23 @@ export async function stepPoll(runId?: number): Promise<StepResult> {
   const progress = asProgress(run.progress);
   const events: StepEvent[] = [];
 
-  if (progress.phase === "context" || !progress.context) {
-    const ctx = await getMarketData().fetchIndexContext();
-    const intradayRet = indexIntradayReturn(ctx.intraday5m, ctx.daily5);
-    const ret5 = ret5Of(ctx.daily5);
-    const indexOk = await judgeIndex({
-      intraday5m: ctx.intraday5m,
-      daily: ctx.daily5,
-      intradayRet,
-      ret5,
-    });
-    progress.context = {
-      indexIntraday5m: ctx.intraday5m,
-      indexDaily: ctx.daily5,
-      indexIntradayRet: intradayRet,
-      indexRet5: ret5,
-      indexOk,
-    };
+  if (progress.phase === "context" || !progress.context?.indexDaily) {
+    const indexDaily = await getMarketData().fetchIndexDaily(120);
+    progress.context = { indexDaily };
     progress.phase = "items";
     await saveProgress(run.id as number, progress);
-    console.log(`[poll] context ready indexOk=${indexOk}`);
+    console.log(`[poll] context ready indexBars=${indexDaily.length}`);
     return {
       done: false,
       processed: progress.processed,
       total: progress.total,
       runId: run.id as number,
       phase: progress.phase,
-      message: "已抓取大盘背景，开始逐只判断",
+      message: "已抓取上证日 K，开始逐只复盘",
       events: [
         {
           level: "info",
-          text: `已抓取上证背景，大盘允许买入 ${(indexOk * 100).toFixed(0)}%`,
+          text: `已抓取上证日 K ${indexDaily.length} 根`,
         },
       ],
     };
@@ -438,74 +267,38 @@ export async function stepPoll(runId?: number): Promise<StepResult> {
 
   for (const item of batch) {
     try {
-      const [bars5m, dailyBars] = await Promise.all([
-        getMarketData().fetchIntraday5m(item.market, item.code),
-        getMarketData().fetchDailyKlines(item.market, item.code, 60),
-      ]);
-      if (bars5m.length === 0) {
+      const dailyBars = await getMarketData().fetchDailyKlines(item.market, item.code, 60);
+      const indicators = await getMarketData().fetchDailyIndicators(item.market, item.code, 30);
+      if (dailyBars.length === 0) {
         progress.failedCodes.push(item.code);
         events.push({
           level: "fail",
-          text: `${item.code} ${item.name} 无分时，跳过`,
+          text: `${item.code} ${item.name} 无日 K，跳过`,
         });
-        console.log(`[poll] fail ${item.code} 无分时`);
+        console.log(`[poll] fail ${item.code} 无日 K`);
         continue;
       }
       const quote = quoteMap.get(`${item.market}:${item.code}`);
-      const price = quote && quote.price > 0 ? quote.price : bars5m.at(-1)!.close;
-      const pctRaw = quote ? quote.changePct / 100 : null;
+      const close = dailyBars.at(-1)!.close;
+      const price = quote && quote.price > 0 ? quote.price : close;
       const daily = deriveDailyFeatures(dailyBars, {
         limitPct: limitPct(item.market, item.code),
         indexBars: progress.context.indexDaily,
       });
-      const intra = deriveIntradayFeatures({
-        bars5m,
-        price,
-        prevClose: quote?.prevClose ?? null,
-        open: quote?.open ?? bars5m[0].open,
-        high: quote?.high ?? Math.max(...bars5m.map((b) => b.high)),
-        low: quote?.low ?? Math.min(...bars5m.map((b) => b.low)),
-        changePct: pctRaw,
-        todayVolume: bars5m.reduce((a, b) => a + b.volume, 0),
-        avgVol20: priorAvgVolume(dailyBars, 20),
-        sessionProgress: sessionProgress(),
-        maxHigh20Prev: priorHigh(dailyBars, 20),
-        limitPct: limitPct(item.market, item.code),
-        indexIntradayRet: progress.context.indexIntradayRet,
+      const trend = deriveTrendIndicators({
+        close,
+        macd: indicators.macd,
+        kdj: indicators.kdj,
+        boll: indicators.boll,
       });
-      const position = derivePositionFeatures({
-        entryPrice: item.entryPrice,
-        addedAt: item.addedAt,
-        price,
-        dailyBars,
+      const judged = await judgeTrend({
+        kind: item.kind,
+        daily,
+        trend,
       });
-      const judged =
-        item.kind === "buy"
-          ? await judgeBuy({
-              item,
-              daily,
-              intra,
-              position,
-              indexOk: progress.context.indexOk,
-              indexRet5: progress.context.indexRet5,
-              price,
-              vwap: intra.vwap,
-            })
-          : await judgeSell({
-              item,
-              daily,
-              intra,
-              position,
-              price,
-              vwap: intra.vwap,
-            });
       const nowIso = new Date().toISOString();
       const pricePatch = price > 0 ? { last_price: price } : {};
-      const features = roundFeatureMap({
-        ...daily,
-        ...intra,
-        pnlPct: position.pnlPct,
-      });
+      const features = trendFeatures(daily, trend);
       if (item.kind === "buy") {
         await sb
           .from("watchlist")
@@ -541,20 +334,17 @@ export async function stepPoll(runId?: number): Promise<StepResult> {
         details: {
           name: item.name,
           tag: judged.tag,
+          trendScore: judged.trendScore,
           parts: judged.parts,
           features,
-          indexOk: progress.context.indexOk,
         },
       });
       const pctText = `${(judged.probability * 100).toFixed(1)}%`;
-      const tagText = judged.tag ? ` ${judged.tag}` : "";
       events.push({
         level: "ok",
-        text: `${item.code} ${item.name}  ${item.kind === "buy" ? "买入" : "卖出"} ${pctText}${tagText}`,
+        text: `${item.code} ${item.name}  ${judged.tag} ${pctText}`,
       });
-      console.log(
-        `[poll] ${item.kind} ${item.code} ${item.name} ${pctText}${tagText}`
-      );
+      console.log(`[poll] ${item.kind} ${item.code} ${item.name} ${judged.tag} ${pctText}`);
     } catch (e) {
       const skipped = e instanceof Error && "skip" in e && (e as { skip?: boolean }).skip;
       const reason = e instanceof Error ? e.message : "未知错误";
@@ -588,12 +378,12 @@ export async function stepPoll(runId?: number): Promise<StepResult> {
       total: progress.total,
       runId: run.id as number,
       phase: "done",
-      message: `轮询完成 ${progress.processed}/${progress.total}`,
+      message: `复盘完成 ${progress.processed}/${progress.total}`,
       events: [
         ...events,
         {
           level: "info",
-          text: `轮询完成，失败 ${progress.failedCodes.length} 只`,
+          text: `复盘完成，失败 ${progress.failedCodes.length} 只`,
         },
       ],
     };
@@ -605,7 +395,7 @@ export async function stepPoll(runId?: number): Promise<StepResult> {
     total: progress.total,
     runId: run.id as number,
     phase: progress.phase,
-    message: `轮询 ${progress.processed}/${progress.total}`,
+    message: `复盘 ${progress.processed}/${progress.total}`,
     events,
   };
 }

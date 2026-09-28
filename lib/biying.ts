@@ -44,14 +44,19 @@ type RateGate = {
   active: number;
   waiters: Array<() => void>;
   pauseUntil: number;
+  minGapMs: number;
+  nextAt: number;
 };
 
 function rateGate(): RateGate {
   const g = globalThis as typeof globalThis & { __biyingRateGate?: RateGate };
   if (!g.__biyingRateGate || typeof g.__biyingRateGate.active !== "number") {
-    g.__biyingRateGate = { active: 0, waiters: [], pauseUntil: 0 };
+    g.__biyingRateGate = { active: 0, waiters: [], pauseUntil: 0, minGapMs: 0, nextAt: 0 };
   }
-  return g.__biyingRateGate;
+  const gate = g.__biyingRateGate;
+  if (typeof gate.minGapMs !== "number") gate.minGapMs = 0;
+  if (typeof gate.nextAt !== "number") gate.nextAt = 0;
+  return gate;
 }
 
 function sleep(ms: number) {
@@ -67,13 +72,14 @@ function licence(): string {
 async function acquireSlot(): Promise<void> {
   const gate = rateGate();
   for (;;) {
-    const wait = gate.pauseUntil - Date.now();
+    const wait = Math.max(gate.pauseUntil, gate.nextAt) - Date.now();
     if (wait > 0) {
       await sleep(wait);
       continue;
     }
     if (gate.active < CONCURRENCY) {
       gate.active += 1;
+      if (gate.minGapMs > 0) gate.nextAt = Date.now() + gate.minGapMs;
       return;
     }
     await new Promise<void>((resolve) => {
@@ -270,6 +276,24 @@ async function historyBars(
   return parseBars(await biyingGet(host));
 }
 
+async function indicatorSeries(
+  kind: "macd" | "kdj" | "boll",
+  symbol: string,
+  lmt: number
+): Promise<Record<string, unknown>[]> {
+  const json = await biyingGet(
+    `https://api.biyingapi.com/hsstock/history/${kind}/${symbol}/d/f/${licence()}?lt=${lmt}`
+  );
+  if (!Array.isArray(json)) {
+    const message =
+      json && typeof json === "object" && "message" in json
+        ? String((json as { message?: unknown }).message ?? "")
+        : "";
+    throw new Error(message || `${kind} 指标为空`);
+  }
+  return json.filter((row): row is Record<string, unknown> => !!row && typeof row === "object");
+}
+
 async function loadBars(
   symbol: string,
   level: "d" | "5",
@@ -355,6 +379,41 @@ export const biyingMarketData: MarketData = {
 
   async fetchDailyKlines(market, code, lmt = 5) {
     return loadBars(`${code}.${suffix(market)}`, "d", "f", lmt);
+  },
+
+  async fetchDailyIndicators(market, code, lmt = 30) {
+    const symbol = `${code}.${suffix(market)}`;
+    const n = Math.max(2, lmt);
+    const macd = await indicatorSeries("macd", symbol, n);
+    const kdj = await indicatorSeries("kdj", symbol, n);
+    const boll = await indicatorSeries("boll", symbol, n);
+    return {
+      macd: macd.map((row) => ({
+        diff: num(row.diff),
+        dea: num(row.dea),
+        macd: num(row.macd),
+      })),
+      kdj: kdj.map((row) => ({
+        k: num(row.k),
+        d: num(row.d),
+        j: num(row.j),
+      })),
+      boll: boll.map((row) => ({
+        upper: num(row.u),
+        mid: num(row.m),
+        lower: num(row.d),
+      })),
+    };
+  },
+
+  setMinGap(ms: number) {
+    const gate = rateGate();
+    gate.minGapMs = Math.max(0, ms);
+    if (gate.minGapMs === 0) gate.nextAt = 0;
+  },
+
+  async fetchIndexDaily(lmt = 120) {
+    return loadBars("000001.SH", "d", null, lmt);
   },
 
   async fetchIntraday5m(market, code, now = new Date()) {
