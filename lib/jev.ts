@@ -105,6 +105,33 @@ export function parseNouls(
   return out;
 }
 
+export type DiscoverScoreSample = {
+  score: number;
+  overextended: number;
+  trendHealthy: number;
+};
+
+/** 三次原始分先平均，再换算展示分，避免先四舍五入再平均 */
+export function averageDiscoverScores(samples: DiscoverScoreSample[]): {
+  score: number;
+  displayScore: number;
+  probability: number;
+  overextended: number;
+  trendHealthy: number;
+} {
+  if (samples.length !== 3) throw new Error("需要三次打分");
+  const mean = (pick: (sample: DiscoverScoreSample) => number) =>
+    samples.reduce((sum, sample) => sum + pick(sample), 0) / samples.length;
+  const score = mean((sample) => sample.score);
+  return {
+    score,
+    displayScore: scoreIndexToDisplay(score),
+    probability: scoreIndexToProbability(score),
+    overextended: mean((sample) => sample.overextended),
+    trendHealthy: mean((sample) => sample.trendHealthy),
+  };
+}
+
 export function buildExcellenceQuestion() {
   return {
     excellence: {

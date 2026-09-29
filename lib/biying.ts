@@ -271,7 +271,7 @@ async function historyBars(
     ? `${symbol}/${level}/${adjust}/${licence()}?lt=${lmt}`
     : `${symbol}/${level}/${licence()}?lt=${lmt}`;
   const host = adjust
-    ? `https://all.biyingapi.com/hsstock/history/${tail}`
+    ? `https://api.biyingapi.com/hsstock/history/${tail}`
     : `https://api.biyingapi.com/hsindex/history/${tail}`;
   return parseBars(await biyingGet(host));
 }

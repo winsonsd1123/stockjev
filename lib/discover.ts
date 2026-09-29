@@ -12,7 +12,12 @@ import {
   passesLiquidity5d,
   shouldScore,
 } from "@/lib/filter";
-import { buildExcellenceQuestion, parseNouls, parseScore } from "@/lib/jev";
+import {
+  averageDiscoverScores,
+  buildExcellenceQuestion,
+  parseNouls,
+  parseScore,
+} from "@/lib/jev";
 import { decide, jevRequest } from "@/lib/jev-client";
 import { limitPct, type Market } from "@/lib/market";
 import { discoverCap, reconcilePool, type PoolAlign } from "@/lib/rules";
@@ -321,15 +326,29 @@ async function scoreOne(
     };
     const questions = buildExcellenceQuestion();
     const prompt = jevRequest(state, questions);
-    const resp = await decide(state, questions);
-    const parsed = parseScore(resp, "excellence");
-    const parts = parseNouls(resp, ["overextended", "trendHealthy"]);
+    const responses = await Promise.all([
+      decide(state, questions),
+      decide(state, questions),
+      decide(state, questions),
+    ]);
+    const samples = responses.map((resp) => {
+      const parsed = parseScore(resp, "excellence");
+      const parts = parseNouls(resp, ["overextended", "trendHealthy"]);
+      const score = parsed.details.score;
+      if (typeof score !== "number") throw new Error("缺少 score");
+      return {
+        score,
+        overextended: parts.overextended,
+        trendHealthy: parts.trendHealthy,
+      };
+    });
+    const averaged = averageDiscoverScores(samples);
     const cap = discoverCap(rawFeatures);
     const capped =
       cap.cap == null
-        ? parsed.probability
-        : Math.min(parsed.probability, cap.cap / 100);
-    const rank = Math.min(capped, parsed.probability * (1 - parts.overextended));
+        ? averaged.probability
+        : Math.min(averaged.probability, cap.cap / 100);
+    const rank = Math.min(capped, averaged.probability * (1 - averaged.overextended));
     const display = Math.round(rank * 100);
     await sb.from("judgments").insert({
       run_id: runId,
@@ -339,19 +358,21 @@ async function scoreOne(
       probability: rank,
       prompt,
       details: {
-        ...parsed.details,
+        type: "score",
+        score: averaged.score,
         name: snap.name,
         features,
-        overextended: parts.overextended,
-        trendHealthy: parts.trendHealthy,
+        overextended: averaged.overextended,
+        trendHealthy: averaged.trendHealthy,
         cap: cap.cap,
         tag: cap.tag,
-        rawDisplayScore: parsed.displayScore,
+        rawDisplayScore: averaged.displayScore,
         displayScore: display,
+        samples,
       },
     });
     console.log(
-      `[discover] score ${snap.code} ${snap.name} raw=${parsed.displayScore} rank=${display}`
+      `[discover] score ${snap.code} ${snap.name} raw=${samples.map((s) => s.score).join(",")} avg=${averaged.displayScore} rank=${display}`
     );
     return {
       level: "ok",

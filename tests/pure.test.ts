@@ -17,6 +17,7 @@ import {
 import {
   composeBuy,
   composeSell,
+  averageDiscoverScores,
   parseNoul,
   parseScore,
   scoreIndexToDisplay,
@@ -352,6 +353,32 @@ describe("jev parse", () => {
     const s = parseScore(response, "excellence");
     expect(s.displayScore).toBe(90);
     expect(s.probability).toBeCloseTo(0.9);
+  });
+
+  it("averages three raw scores before display rounding", () => {
+    const samples = [
+      { score: 7, overextended: 0.1, trendHealthy: 0.2 },
+      { score: 7, overextended: 0.2, trendHealthy: 0.4 },
+      { score: 7.2, overextended: 0.3, trendHealthy: 0.6 },
+    ];
+    const avg = averageDiscoverScores(samples);
+    const meanOfDisplays =
+      (scoreIndexToDisplay(7) + scoreIndexToDisplay(7) + scoreIndexToDisplay(7.2)) / 3;
+    expect(avg.score).toBeCloseTo(7.066666, 5);
+    expect(avg.displayScore).toBe(79);
+    expect(avg.displayScore).not.toBe(meanOfDisplays);
+    expect(avg.probability).toBeCloseTo(0.79);
+    expect(avg.overextended).toBeCloseTo(0.2);
+    expect(avg.trendHealthy).toBeCloseTo(0.4);
+  });
+
+  it("rejects a sample count other than three", () => {
+    expect(() =>
+      averageDiscoverScores([
+        { score: 8, overextended: 0, trendHealthy: 1 },
+        { score: 8, overextended: 0, trendHealthy: 1 },
+      ])
+    ).toThrow("需要三次打分");
   });
 });
 
